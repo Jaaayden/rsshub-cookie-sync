@@ -22,6 +22,19 @@ async function flush() {
   }
 }
 
+async function waitFor(predicate, message, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(message);
+    }
+    // Web Crypto may finish on a worker thread, so counting a fixed number of
+    // microtask/immediate turns is not a portable completion condition.
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  await flush();
+}
+
 function fakeCookie(provider) {
   if (provider === 'zhihu') {
     return {
@@ -163,7 +176,10 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     );
     const initialMessages = fake.nativeMessages.length;
     fake.events.installed.dispatch({ reason: 'install' });
-    await flush();
+    await waitFor(
+      () => fake.nativeMessages.length >= initialMessages + 2,
+      'install should try both providers',
+    );
     assert.ok(fake.nativeMessages.length >= initialMessages + 2, 'install should try both providers');
     assert.ok(
       fake.permissionChecks.some(
@@ -180,18 +196,32 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
 
     const afterInstall = fake.nativeMessages.length;
     fake.events.startup.dispatch();
-    await flush();
+    await waitFor(
+      () => fake.nativeMessages.length >= afterInstall + 2,
+      'startup should try both providers',
+    );
     assert.ok(fake.nativeMessages.length >= afterInstall + 2, 'startup should try both providers');
 
     const afterStartup = fake.nativeMessages.length;
     fake.events.alarm.dispatch({ name: 'rsshub-cookie-sync:periodic' });
-    await flush();
+    await waitFor(
+      () => fake.nativeMessages.length >= afterStartup + 2,
+      'periodic alarm should try both providers',
+    );
     assert.ok(fake.nativeMessages.length >= afterStartup + 2, 'periodic alarm should try both providers');
 
     const beforeDebounce = fake.nativeMessages.length;
+    const debounceCreatesBeforeFirstEvent = fake.alarmCalls.filter(
+      (call) => call.operation === 'create' && call.name === 'rsshub-cookie-sync:debounce:zhihu',
+    ).length;
     const zhihuEvent = { cookie: fakeCookie('zhihu'), removed: false };
     fake.events.cookieChanged.dispatch(zhihuEvent);
-    await flush();
+    await waitFor(
+      () => fake.alarmCalls.filter(
+        (call) => call.operation === 'create' && call.name === 'rsshub-cookie-sync:debounce:zhihu',
+      ).length === debounceCreatesBeforeFirstEvent + 1,
+      'cookie change should schedule a Zhihu debounce alarm',
+    );
     assert.equal(fake.nativeMessages.length, beforeDebounce, 'cookie change waits for debounce alarm');
     assert.ok(
       fake.alarmCalls.some(
@@ -203,7 +233,12 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
       (call) => call.operation === 'create' && call.name === 'rsshub-cookie-sync:debounce:zhihu',
     ).length;
     fake.events.cookieChanged.dispatch(zhihuEvent);
-    await flush();
+    await waitFor(
+      () => fake.alarmCalls.filter(
+        (call) => call.operation === 'create' && call.name === 'rsshub-cookie-sync:debounce:zhihu',
+      ).length === debounceCreatesBeforeSecondEvent + 1,
+      'a second cookie change should replace the debounce alarm',
+    );
     const debounceCreatesAfterSecondEvent = fake.alarmCalls.filter(
       (call) => call.operation === 'create' && call.name === 'rsshub-cookie-sync:debounce:zhihu',
     ).length;
@@ -216,7 +251,10 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
 
     const beforeDebounceAlarm = fake.nativeMessages.length;
     fake.events.alarm.dispatch({ name: 'rsshub-cookie-sync:debounce:zhihu' });
-    await flush();
+    await waitFor(
+      () => fake.nativeMessages.length === beforeDebounceAlarm + 1,
+      'debounce alarm should sync only Zhihu',
+    );
     assert.equal(fake.nativeMessages.length, beforeDebounceAlarm + 1, 'debounce alarm should sync only Zhihu');
 
     const statusResponse = await sendMessage(fake.events.message, {
