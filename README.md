@@ -116,11 +116,12 @@ chmod 600 ~/.ssh/id_ed25519
 ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
 ```
 
-如果没有 `.pub` 文件，可以只在本机从私钥派生公钥（不会上传私钥）：
+如果没有 `.pub` 文件，可以只在本机从私钥派生配对公钥（不会上传私钥）。把它放回同名位置后，扩展才能识别这把 Ed25519 私钥：
 
 ```sh
-ssh-keygen -y -f ~/.ssh/id_ed25519 > /tmp/rsshub-cookie-sync-id_ed25519.pub
-ssh-keygen -lf /tmp/rsshub-cookie-sync-id_ed25519.pub -E sha256
+ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+chmod 644 ~/.ssh/id_ed25519.pub
+ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
 ```
 
 确认指纹无误后，再执行授权：
@@ -131,7 +132,7 @@ ssh -p <管理员SSH端口> root@<服务器地址> \
   < ~/.ssh/rsshub-cookie-sync.pub
 ```
 
-如果你复用了 `id_ed25519`，把最后的路径换成 `~/.ssh/id_ed25519.pub`；如果是刚才派生的公钥，则换成 `/tmp/rsshub-cookie-sync-id_ed25519.pub`。命令中不会出现公钥内容；私钥永远不离开 Mac。也可以在服务器安装器询问时，直接粘贴公钥的一整行。
+如果你复用了 `id_ed25519`，把最后的路径换成 `~/.ssh/id_ed25519.pub`。命令中不会出现公钥内容；私钥永远不离开 Mac。也可以在服务器安装器询问时，直接粘贴公钥的一整行。
 
 每台服务器只保留一个同步公钥。再次执行 `provision-key` 会替换旧公钥，而不是追加；替换后，仍使用旧私钥的设备会立即无法同步。只有在确认要更换采集设备或密钥时才重新 provision，并随后在扩展中选择同一对私钥。
 

@@ -612,8 +612,9 @@ def install(
     else:
         known_hosts_file = _safe_path(trusted_root / ".ssh" / "known_hosts")
 
-    _copy_file_atomic(source_host, host_path, 0o700)
-    _atomic_write_bytes(launcher_path, _native_launcher(None, host_path), 0o700)
+    # Finish every key/trust/config validation before replacing the running
+    # Host or launcher.  A rejected legacy RSA key or malformed known_hosts
+    # must leave the previously installed executable untouched.
     _ensure_identity(selected_identity, generate=not no_generate_key)
     known_hosts_ready = _ensure_known_hosts(
         known_hosts_file,
@@ -630,12 +631,16 @@ def install(
         server_user=effective_user,
         connect_timeout=effective_timeout,
     )
+    launcher_payload = _native_launcher(None, host_path)
+    manifest = build_manifest(launcher_path, extension_id)
+
+    _copy_file_atomic(source_host, host_path, 0o700)
+    _atomic_write_bytes(launcher_path, launcher_payload, 0o700)
     _atomic_write_bytes(
         config_path,
         json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",
         0o600,
     )
-    manifest = build_manifest(launcher_path, extension_id)
     _atomic_write_bytes(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",

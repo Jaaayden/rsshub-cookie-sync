@@ -192,6 +192,34 @@ class InstallTests(unittest.TestCase):
         with self.assertRaises(install.InstallError):
             install._ensure_identity(identity, generate=False)
 
+    def test_invalid_identity_does_not_replace_an_installed_host(self) -> None:
+        self.app_dir.mkdir(parents=True)
+        old_host = self.app_dir / "native_host.py"
+        old_launcher = self.app_dir / "native_host"
+        old_host.write_text("old host\n", encoding="ascii")
+        old_launcher.write_text("old launcher\n", encoding="ascii")
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir()
+        identity = ssh_dir / "id_rsa"
+        identity.write_text("private", encoding="ascii")
+        identity.chmod(0o600)
+        identity.with_name("id_rsa.pub").write_text(
+            "ssh-rsa AAAA unsupported\n", encoding="ascii"
+        )
+
+        with self.assertRaises(install.InstallError):
+            install.install(
+                extension_id=self.extension_id,
+                app_support_dir=self.app_dir,
+                edge_manifest_dir=self.edge_dir,
+                identity_file=identity,
+                no_generate_key=True,
+                allowed_root=self.root,
+            )
+
+        self.assertEqual(old_host.read_text(encoding="ascii"), "old host\n")
+        self.assertEqual(old_launcher.read_text(encoding="ascii"), "old launcher\n")
+
     def test_zero_argument_cli_uses_public_defaults(self) -> None:
         args = install._parse_args([])
         self.assertEqual(args.extension_id, install.DEFAULT_EXTENSION_ID)

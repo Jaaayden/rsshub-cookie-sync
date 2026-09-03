@@ -58,11 +58,12 @@ chmod 600 ~/.ssh/id_ed25519
 ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
 ```
 
-如果 `.pub` 文件不存在，可以在本机派生公钥后再查看指纹：
+如果 `.pub` 文件不存在，可以在本机派生到同名位置，再查看指纹；放在其他目录不会让它出现在扩展密钥列表中：
 
 ```sh
-ssh-keygen -y -f ~/.ssh/id_ed25519 > /tmp/rsshub-cookie-sync-id_ed25519.pub
-ssh-keygen -lf /tmp/rsshub-cookie-sync-id_ed25519.pub -E sha256
+ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
+chmod 644 ~/.ssh/id_ed25519.pub
+ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
 ```
 
 确认服务器主机指纹后，用管理员 SSH 连接把对应公钥通过标准输入交给授权程序：

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RSSHub Cookie Sync",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "将已登录的知乎和微博 Cookie 安全同步到 RSSHub。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA323/+ImZN5Mo5zSm473q5+u38RrtPvQojY64ynGpON0Bvy1Q5tjZx8zBe0nDYNjkBJOcpFd7WfYIMciaI5h/VeKpOlhwCQmUmzsx9g05q+pGVOI8qzGg3BM14aYNrydaA/JgqXcaDhLNnrVI2rzi205KZh7eCfKYdpjWnDdp1cKCy8k1g13qvnc4hxLz7FEMc3W+ydyxxgYlgtwu3iTNEcv0y5ssNxRnWfGzUraF0lQGWFelqPgahPUNSu/kHH6Xh80jjfkzIDQE/EDhMYc1Yx8K+KgT39Lrhxk/296wSeokEgqTgU2bPwUzFWw1TL/9altahx1ThWd5LtBSs74vxQIDAQAB",
   "permissions": [
