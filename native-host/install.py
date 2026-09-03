@@ -33,7 +33,7 @@ try:
         HOST_NAME,
         ConfigurationError,
         HostConfig,
-        load_config,
+        load_config_for_migration,
     )
 except ImportError:  # pragma: no cover - supports direct path execution
     from .native_host import (  # type: ignore
@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - supports direct path execution
         HOST_NAME,
         ConfigurationError,
         HostConfig,
-        load_config,
+        load_config_for_migration,
     )
 
 
@@ -175,15 +175,13 @@ def _validate_endpoint(value: str, *, label: str) -> str:
 
 
 def _validate_user(value: str) -> str:
-    if (
-        not value
-        or len(value) > 64
-        or not value.isascii()
-        or not (value[0].isalpha() or value[0] == "_")
-        or any(not (char.isalnum() or char in "_.-") for char in value)
-    ):
-        raise InstallError("--server-user 不合法")
-    return value
+    # The browser-facing host relies on the forced-command account installed
+    # by the server component.  Accepting another syntactically valid user
+    # here would create a configuration that either fails later or, worse,
+    # targets an unrestricted account such as root.
+    if value != DEFAULT_SERVER_USER:
+        raise InstallError(f"--server-user 固定为 {DEFAULT_SERVER_USER}")
+    return DEFAULT_SERVER_USER
 
 
 def _validate_port(value: int, label: str) -> int:
@@ -330,6 +328,30 @@ def _generate_identity(key_path: Path) -> None:
     os.chmod(key_path, 0o600)
 
 
+def _validate_ed25519_public_sidecar(key_path: Path) -> None:
+    """Require the public half accepted by the server provisioner."""
+
+    public_path = Path(f"{key_path}.pub")
+    _assert_not_symlink(public_path)
+    try:
+        info = public_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise InstallError("SSH 公钥必须是当前用户拥有的普通文件")
+        if info.st_mode & 0o022 or not 1 <= info.st_size <= 8192:
+            raise InstallError("SSH 公钥权限或大小不安全")
+        payload = public_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise InstallError("缺少对应的 .pub 公钥文件") from exc
+    except OSError as exc:
+        raise InstallError("SSH 公钥不可读") from exc
+    if b"\x00" in payload or b"\r" in payload:
+        raise InstallError("SSH 公钥格式不合法")
+    lines = payload.strip().split(b"\n")
+    fields = lines[0].split() if len(lines) == 1 else []
+    if len(fields) < 2 or fields[0] != b"ssh-ed25519":
+        raise InstallError("只支持 Ed25519 SSH 密钥")
+
+
 def _ensure_identity(key_path: Path, *, generate: bool) -> None:
     """Validate/reuse an existing key, or create the default one."""
 
@@ -346,10 +368,12 @@ def _ensure_identity(key_path: Path, *, generate: bool) -> None:
         if info.st_uid != os.getuid():
             raise InstallError("SSH 密钥必须由当前用户拥有")
         os.chmod(key_path, 0o600)
+        _validate_ed25519_public_sidecar(key_path)
         return
     if not generate:
         raise InstallError("未找到 SSH 密钥；请移除 --no-generate-key 或先准备 --identity-file")
     _generate_identity(key_path)
+    _validate_ed25519_public_sidecar(key_path)
 
 
 def _ensure_known_hosts(
@@ -534,7 +558,7 @@ def install(
     existing: Optional[HostConfig] = None
     if os.path.lexists(str(config_path)):
         try:
-            existing = load_config(config_path)
+            existing = load_config_for_migration(config_path)
         except ConfigurationError as exc:
             raise InstallError("已有配置文件不合法；为避免清空部署，请先修复或备份它") from exc
 
@@ -659,7 +683,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     )
     parser.add_argument("--server-host", help="服务器地址；不填则保留已有配置，首次安装可稍后在扩展设置中填写")
     parser.add_argument("--server-port", type=int, default=None)
-    parser.add_argument("--server-user", default=None)
+    # Retain the exact-value flag for compatibility with older install
+    # commands, but keep it out of normal help because the account is not a
+    # deployment choice.
+    parser.add_argument("--server-user", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--identity-file",
         type=Path,

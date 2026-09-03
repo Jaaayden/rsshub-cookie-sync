@@ -45,10 +45,35 @@ python3 native-host/install.py
 
 打开扩展“连接设置”，确认服务器地址、SSH 端口和密钥文件名。然后确认：
 
-1. 选中的私钥位于当前用户的 `~/.ssh/`，并且与服务器上 provision 的 `.pub` 公钥是一对；
-2. `~/.ssh/known_hosts` 中存在目标地址和端口的 Ed25519 条目；
-3. 条目的指纹已经通过服务器控制台或其他独立可信渠道核对；
-4. 服务器端 `rsshub-sync` 账号仍存在，公钥没有被替换或删除。
+1. 扩展日常连接的用户名固定为 `rsshub-sync`，不是 `root`；`root` 只用于服务端安装和公钥授权；
+2. 选中的私钥位于当前用户的 `~/.ssh/`，并且与服务器上 provision 的 `.pub` 公钥是一对；
+3. `~/.ssh/known_hosts` 中存在目标地址和端口的 Ed25519 条目；
+4. 条目的指纹已经通过服务器控制台或其他独立可信渠道核对；
+5. 服务器端 `rsshub-sync` 账号仍存在，公钥没有被替换或删除。
+
+最常见的原因是“选择了 `id_ed25519`，但没有授权对应的 `id_ed25519.pub`”。先在本机确认指纹：
+
+```sh
+chmod 600 ~/.ssh/id_ed25519
+ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
+```
+
+如果 `.pub` 文件不存在，可以在本机派生公钥后再查看指纹：
+
+```sh
+ssh-keygen -y -f ~/.ssh/id_ed25519 > /tmp/rsshub-cookie-sync-id_ed25519.pub
+ssh-keygen -lf /tmp/rsshub-cookie-sync-id_ed25519.pub -E sha256
+```
+
+确认服务器主机指纹后，用管理员 SSH 连接把对应公钥通过标准输入交给授权程序：
+
+```sh
+ssh -p <管理员SSH端口> root@<服务器地址> \
+  /usr/local/sbin/rsshub-cookie-sync-provision-key \
+  < ~/.ssh/id_ed25519.pub
+```
+
+授权程序每次会替换旧的同步公钥，而不是追加。替换后，仍使用旧私钥的设备会无法同步；因此不要在未确认新私钥可用前替换生产中的旧公钥。
 
 主机密钥校验故意采用严格模式。不要使用“接受未知 key”或关闭校验来绕过错误。
 

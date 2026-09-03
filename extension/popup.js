@@ -215,10 +215,20 @@ syncButton.addEventListener('click', async () => {
   try {
     const response = await sendMessage({ type: 'sync-now' });
     if (!response?.ok) throw new Error('sync_failed');
-    showNotice('同步请求已发送。', 'success');
     // Read the state again after the upload finishes so the popup reflects
     // the background's persisted result, including concurrent alarm changes.
     await refresh();
+    const results = Object.values(response.providers ?? {}).map((value) => value?.lastResult);
+    if (results.includes('retryable_error')) {
+      showNotice(
+        '同步未完成。若刚更换 SSH 密钥，请先把对应 .pub 公钥安装到服务器的 rsshub-sync 账号。',
+        'error',
+      );
+    } else if (results.some((value) => ['rejected_invalid', 'missing_cookie', 'permission_required'].includes(value))) {
+      showNotice('同步未完成，请按服务卡片中的状态处理。', 'error');
+    } else {
+      showNotice('同步完成。', 'success');
+    }
   } catch {
     showNotice('同步失败，请检查站点权限或 Native Host。', 'error');
   } finally {

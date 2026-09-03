@@ -58,6 +58,8 @@ test('连接设置拒绝注入、路径和无效端口', () => {
   for (const candidate of [
     { ...valid, host: 'example.test;curl evil' },
     { ...valid, host: 'example.test\nssh' },
+    { ...valid, user: 'root' },
+    { ...valid, user: 'other-user' },
     { ...valid, user: 'root --proxy-command=bad' },
     { ...valid, identityName: '../id_ed25519' },
     { ...valid, identityName: 'key name' },
@@ -72,6 +74,15 @@ test('连接设置拒绝注入、路径和无效端口', () => {
   assert.deepEqual(
     normalizeNativeConfigInput({ ...NATIVE_CONFIG_DEFAULTS }, { allowEmptyHost: true }),
     NATIVE_CONFIG_DEFAULTS,
+  );
+  assert.deepEqual(
+    sanitizeNativeConfigResponse({
+      status: 'config',
+      server: { host: valid.host, port: 22, user: 'root' },
+      identityName: valid.identityName,
+      identities: [{ name: valid.identityName, legacy: false }],
+    }),
+    { ok: false, error: 'invalid_response' },
   );
 });
 

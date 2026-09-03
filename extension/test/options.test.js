@@ -13,6 +13,9 @@ test('连接设置页已注册为 Manifest options_ui，并包含刷新/保存�
   assert.match(html, /id="refresh"/);
   assert.match(html, /id="settings-form"/);
   assert.match(html, /id="identity-name"/);
+  assert.match(html, /id="server-user"[^>]*value="rsshub-sync"[^>]*readonly/);
+  assert.match(html, /选择私钥不会自动授权/);
+  assert.match(html, /Ed25519/);
 });
 
 test('连接设置页刷新和加载只走脱敏控制消息，不读取 Cookie 或扩展存储', async () => {
@@ -31,4 +34,5 @@ test('Popup 提供连接设置入口', async () => {
   assert.match(html, /id="settings"/);
   assert.match(source, /settingsButton\.addEventListener\('click'/);
   assert.match(source, /runtime\.openOptionsPage\(\)/);
+  assert.match(source, /\.pub 公钥安装到服务器的 rsshub-sync 账号/);
 });

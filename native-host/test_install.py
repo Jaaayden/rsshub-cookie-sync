@@ -171,6 +171,27 @@ class InstallTests(unittest.TestCase):
         )
         self.assertNotIn("proxy", config)
 
+    def test_installer_rejects_non_sync_server_user(self) -> None:
+        with self.assertRaises(install.InstallError):
+            install.build_config(
+                identity_file=self.root / ".ssh" / "rsshub-cookie-sync",
+                known_hosts_file=self.root / ".ssh" / "known_hosts",
+                server_host=self.server_host,
+                server_user="root",
+            )
+
+    def test_installer_rejects_non_ed25519_identity(self) -> None:
+        ssh_dir = self.root / ".ssh"
+        ssh_dir.mkdir(parents=True)
+        identity = ssh_dir / "id_rsa"
+        identity.write_text("private", encoding="ascii")
+        identity.chmod(0o600)
+        identity.with_name("id_rsa.pub").write_text(
+            "ssh-rsa AAAA unsupported\n", encoding="ascii"
+        )
+        with self.assertRaises(install.InstallError):
+            install._ensure_identity(identity, generate=False)
+
     def test_zero_argument_cli_uses_public_defaults(self) -> None:
         args = install._parse_args([])
         self.assertEqual(args.extension_id, install.DEFAULT_EXTENSION_ID)
@@ -254,7 +275,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(paths["identity_file"], legacy_key)
         self.assertEqual(paths["known_hosts_file"], legacy_known_hosts)
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        self.assertEqual(config["server"], {"host": self.server_host, "port": 2222, "user": "old-user"})
+        self.assertEqual(config["server"], {"host": self.server_host, "port": 2222, "user": "rsshub-sync"})
         self.assertEqual(config["ssh"]["identity_file"], str(legacy_key))
         self.assertNotIn("proxy", config)
 

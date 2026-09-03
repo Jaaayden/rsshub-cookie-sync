@@ -19,7 +19,6 @@ export const NATIVE_CONFIG_ACTIONS = Object.freeze({
 });
 
 const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/u;
-const USER_RE = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
 const IDENTITY_RE = /^[A-Za-z0-9._+-]{1,128}$/u;
 const SAFE_ERROR_CODES = new Set([
   'configuration_missing',
@@ -53,7 +52,7 @@ function normalizeHost(value, { allowEmpty = false } = {}) {
 function normalizeUser(value) {
   if (typeof value !== 'string') return null;
   const user = value.trim();
-  return USER_RE.test(user) ? user : null;
+  return user === NATIVE_CONFIG_DEFAULTS.user ? NATIVE_CONFIG_DEFAULTS.user : null;
 }
 
 function normalizeIdentityName(value) {

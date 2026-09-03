@@ -99,7 +99,7 @@ ssh -p <管理员SSH端口> root@<服务器地址> \
 
 ## 旧版本迁移
 
-旧版本可能把私钥和主机密钥放在 Application Support。重新运行 `python3 native-host/install.py` 会尽量保留可验证的旧配置；新的安装默认使用 `~/.ssh/rsshub-cookie-sync` 和 `~/.ssh/known_hosts`。完成迁移后，应在扩展设置页确认服务器地址和密钥选择，并重新核对主机指纹。
+旧版本可能把私钥和主机密钥放在 Application Support。重新运行 `python3 native-host/install.py` 会尽量保留可验证的旧配置；若旧配置曾写入其他 SSH 用户名，安装器会安全迁移为固定的 `rsshub-sync`，该旧用户名绝不会进入新的 SSH 命令。新的安装默认使用 `~/.ssh/rsshub-cookie-sync` 和 `~/.ssh/known_hosts`。完成迁移后，应在扩展设置页确认服务器地址和 Ed25519 密钥选择，并重新核对主机指纹、授权对应公钥。
 
 ## 卸载
 

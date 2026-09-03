@@ -161,6 +161,21 @@ def _validate_endpoint(host: str, user: Optional[str] = None) -> None:
         raise ConfigurationError("invalid SSH user")
 
 
+def _validate_server_user(user: Any) -> str:
+    """Require the dedicated forced-command account for every SSH session.
+
+    The server-side installer provisions ``rsshub-sync`` with a forced
+    command and no interactive shell.  A user value from an old or manually
+    edited config must therefore never be allowed to select ``root`` (or any
+    other account), even if it otherwise matches the normal SSH username
+    grammar.
+    """
+
+    if user != DEFAULT_SERVER_USER:
+        raise ConfigurationError("unsupported SSH user")
+    return DEFAULT_SERVER_USER
+
+
 def _validate_binary(path: str) -> str:
     if (
         not isinstance(path, str)
@@ -226,7 +241,9 @@ def config_from_mapping(raw: Mapping[str, Any], *, config_path: Optional[Path] =
         server_host: Optional[str] = None
     else:
         server_host = _string(raw_host, "server host")
-    server_user = _string(server.get("user", DEFAULT_SERVER_USER), "server user")
+    server_user = _validate_server_user(
+        _string(server.get("user", DEFAULT_SERVER_USER), "server user")
+    )
     server_port = _port(server.get("port", DEFAULT_SERVER_PORT))
 
     identity = ssh.get("identity_file", str(DEFAULT_IDENTITY_FILE))
@@ -300,6 +317,27 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> HostConfig:
     return config_from_mapping(raw, config_path=path)
 
 
+def load_config_for_migration(path: Path = DEFAULT_CONFIG_PATH) -> HostConfig:
+    """Load legacy metadata while replacing its SSH user with the safe one.
+
+    Runtime code must use :func:`load_config`, which rejects every account
+    except ``rsshub-sync``.  The installer and a user-initiated set-config
+    request may use this narrow migration path so an old custom-user config
+    can be repaired without ever placing that legacy username in SSH argv.
+    """
+
+    path = _default_path(path)
+    raw = _read_config_mapping(path)
+    server = raw.get("server")
+    if not isinstance(server, dict):
+        raise ConfigurationError("invalid server configuration")
+    migrated = dict(raw)
+    migrated_server = dict(server)
+    migrated_server["user"] = DEFAULT_SERVER_USER
+    migrated["server"] = migrated_server
+    return config_from_mapping(migrated, config_path=path)
+
+
 def _safe_key_file(path: Path) -> None:
     """Validate a private key path before handing it to OpenSSH."""
 
@@ -311,6 +349,36 @@ def _safe_key_file(path: Path) -> None:
         raise ConfigurationError("SSH identity is not regular")
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ConfigurationError("SSH identity permissions are unsafe")
+
+
+def _has_safe_ed25519_public_key(identity: Path) -> bool:
+    """Confirm that an identity has a safe Ed25519 public-key sidecar.
+
+    The server provisioning command intentionally accepts only Ed25519.  The
+    Options page must therefore not offer RSA/ECDSA identities that can never
+    be installed on ``rsshub-sync``.  This check inspects only the public
+    sidecar and never returns key material.
+    """
+
+    public_key = identity.with_name(f"{identity.name}.pub")
+    try:
+        info = public_key.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return False
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return False
+        if not 1 <= info.st_size <= 8192:
+            return False
+        payload = public_key.read_bytes()
+    except (OSError, ValueError):
+        return False
+    if b"\x00" in payload or b"\r" in payload:
+        return False
+    lines = payload.strip().split(b"\n")
+    if len(lines) != 1:
+        return False
+    fields = lines[0].split()
+    return len(fields) >= 2 and fields[0] == b"ssh-ed25519"
 
 
 def _safe_known_hosts_file(path: Path) -> None:
@@ -325,7 +393,7 @@ def _safe_known_hosts_file(path: Path) -> None:
 
 
 def validate_runtime_files(config: HostConfig) -> None:
-    """Check the files used by SSH without reading either file's contents."""
+    """Check the private key and known_hosts files used by SSH."""
 
     _safe_key_file(config.identity_file)
     _safe_known_hosts_file(config.known_hosts_file)
@@ -342,6 +410,7 @@ def build_ssh_argv(config: HostConfig) -> Tuple[str, ...]:
     _port(config.server_port)
     if config.server_host is None:
         raise ConfigurationError("server endpoint is not configured")
+    _validate_server_user(config.server_user)
     _validate_endpoint(config.server_host, config.server_user)
     if not isinstance(config.connect_timeout, int) or isinstance(config.connect_timeout, bool):
         raise ConfigurationError("invalid SSH timeout")
@@ -727,32 +796,18 @@ def _legacy_identity_path(config: HostConfig) -> Optional[Path]:
         _safe_key_file(path)
     except ConfigurationError:
         return None
+    if not _has_safe_ed25519_public_key(path):
+        return None
     return path
 
 
 def _identity_looks_private(path: Path) -> bool:
-    """Recognise private-key files without emitting or retaining key data."""
+    """Recognise selectable identities without reading private-key bytes."""
 
-    try:
-        with path.open("rb") as handle:
-            prefix = handle.read(512)
-    except (OSError, UnicodeError):
-        return False
-    if b"PRIVATE KEY" in prefix:
-        return True
-    # ssh-keygen-created keys normally have a .pub sidecar.  Accepting a
-    # verified, safe sidecar also covers platform-specific private-key
-    # formats whose first bytes do not contain a PEM marker.
-    public_path = path.with_name(f"{path.name}.pub")
-    try:
-        info = public_path.lstat()
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            return False
-        if info.st_uid != os.getuid() or info.st_mode & 0o022:
-            return False
-        return bool(public_path.stat().st_size)
-    except (OSError, ValueError):
-        return False
+    # _safe_key_file() has already established that `path` is a protected
+    # regular file.  The paired public key is sufficient to filter algorithm
+    # support; OpenSSH remains the authority on the private file itself.
+    return _has_safe_ed25519_public_key(path)
 
 
 def scan_ssh_identities() -> Tuple[Mapping[str, Any], ...]:
@@ -800,6 +855,8 @@ def _identity_name_for_config(config: HostConfig) -> Optional[str]:
         try:
             _safe_key_file(_default_path(config.identity_file))
         except ConfigurationError:
+            return None
+        if not _has_safe_ed25519_public_key(_default_path(config.identity_file)):
             return None
         return direct
     if _legacy_identity_path(config) is not None:
@@ -969,7 +1026,11 @@ def process_control_request(raw: bytes, config_path: Path = DEFAULT_CONFIG_PATH)
         return {"status": "rejected_invalid"}
 
     try:
-        current = load_config(config_path)
+        current = (
+            load_config(config_path)
+            if action == "get-config"
+            else load_config_for_migration(config_path)
+        )
         if action == "get-config":
             public = _public_config(current)
             if public["identityName"] is None:
@@ -1019,8 +1080,9 @@ def write_control_response(stream: BinaryIO, response: Mapping[str, Any]) -> Non
             if not isinstance(server, dict) or set(server) != {"host", "port", "user"}:
                 raise ValueError
             host = server.get("host")
+            user = _validate_server_user(server.get("user"))
             if host is not None:
-                _validate_endpoint(host, server.get("user"))
+                _validate_endpoint(host, user)
             _port(server.get("port"))
             if not isinstance(identity_name, str):
                 raise ValueError
@@ -1043,7 +1105,7 @@ def write_control_response(stream: BinaryIO, response: Mapping[str, Any]) -> Non
                 "server": {
                     "host": host,
                     "port": server["port"],
-                    "user": server["user"],
+                    "user": user,
                 },
                 "identityName": identity_name,
                 "identities": clean_identities,

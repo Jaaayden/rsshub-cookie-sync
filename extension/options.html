@@ -26,6 +26,12 @@
         </label>
 
         <label class="field compact-field">
+          <span>SSH 用户名</span>
+          <input id="server-user" name="user" type="text" value="rsshub-sync" readonly aria-readonly="true">
+          <small>固定使用 <code>rsshub-sync</code>，不是 <code>root</code>；此账号只允许执行 Cookie 同步操作。</small>
+        </label>
+
+        <label class="field compact-field">
           <span>SSH 端口</span>
           <input id="server-port" name="port" type="number" min="1" max="65535" step="1" value="22" required>
           <small>一般保持默认值 22；连接账号固定为安装器创建的 <code>rsshub-sync</code>。</small>
@@ -36,7 +42,7 @@
           <select id="identity-name" name="identityName" required>
             <option value="rsshub-cookie-sync">rsshub-cookie-sync（默认）</option>
           </select>
-          <small>只选择 <code>~/.ssh/</code> 下已有的文件名；私钥始终由本机 Native Host 使用，扩展无法读取它。</small>
+          <small>这里只显示 <code>~/.ssh/</code> 下带有配对 <code>.pub</code> 文件的 Ed25519 私钥。选择私钥不会自动授权，必须先把对应公钥安装到服务器的 <code>rsshub-sync</code> 账号。私钥始终由本机 Native Host 使用，扩展无法读取它。</small>
         </label>
 
         <div class="actions">

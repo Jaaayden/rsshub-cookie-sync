@@ -29,6 +29,8 @@ git clone https://github.com/Jaaayden/rsshub-cookie-sync.git ~/rsshub-cookie-syn
 3. 确认已经按 [Native Host 说明](../native-host/README.md) 安装本机桥接程序，并在扩展“连接设置”中填写服务器地址、端口和 SSH 密钥文件名。
 4. 点击“立即同步”。
 
+> 重要：选择 `id_ed25519` 只会选择本机私钥，不会自动授权。对应的 `~/.ssh/id_ed25519.pub` 必须先通过管理员 SSH 连接安装到服务器的 `rsshub-sync` 账号；扩展日常连接使用的不是 `root`。
+
 扩展只读取以下两个请求 URL 适用的 Cookie：
 
 ```text
@@ -74,10 +76,21 @@ https://m.weibo.cn/feed/group
 - “服务器地址”：填写运行 RSSHub 的域名或 IPv4 地址；
 - “SSH 端口”：通常为 `22`；
 - “SSH 密钥文件名”：选择 `~/.ssh/` 下已有的密钥。
+- “SSH 用户名”：只读显示为 `rsshub-sync`；它不可修改，也不是 `root`。
 
-点击“保存连接设置”后，设置写入本机 Native Host 的 `config.json`，不会写入扩展存储。扩展只接触文件名，私钥内容由 Native Host 在本机读取。服务器端账号由安装器创建为 `rsshub-sync`，不需要在这里填写。
+点击“保存连接设置”后，设置写入本机 Native Host 的 `config.json`，不会写入扩展存储。扩展只接触文件名，Native Host 只把选中的路径交给本机系统 SSH；私钥内容不会进入扩展。服务器端账号由安装器创建为 `rsshub-sync`，不需要在这里填写。
 
-如果刚安装 Host，默认密钥名是 `rsshub-cookie-sync`。你也可以复用 `~/.ssh/` 下已有的安全私钥，前提是权限为 `0600` 或更严格，并且已把对应公钥安装到服务器。连接设置页会在保存后显示结果；“重新读取设置”可以再次从 Native Host 读取确认。
+如果刚安装 Host，默认密钥名是 `rsshub-cookie-sync`。你也可以复用 `~/.ssh/` 下已有的 Ed25519 私钥，前提是权限为 `0600` 或更严格、旁边存在配对的 `.pub`，并且已把该公钥安装到服务器 `rsshub-sync` 账号。RSA、ECDSA 和缺少 `.pub` 的私钥不会出现在列表中。仅在下拉框中选择已有私钥不会完成授权。连接设置页会在保存后显示结果；“重新读取设置”可以再次从 Native Host 读取确认。
+
+公钥授权使用管理员账号完成，例如：
+
+```sh
+ssh -p <管理员SSH端口> root@<服务器地址> \
+  /usr/local/sbin/rsshub-cookie-sync-provision-key \
+  < ~/.ssh/id_ed25519.pub
+```
+
+这个命令只通过标准输入发送公钥，不会发送私钥。`provision-key` 每次会替换服务器上旧的同步公钥；更换后仍使用旧私钥的设备会无法连接。确认公钥已授权后，再选择对应私钥并点击“立即同步”。
 
 ## 权限
 
