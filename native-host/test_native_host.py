@@ -410,11 +410,14 @@ class NativeHostTests(unittest.TestCase):
     def test_invalid_frame_returns_rejected_status_without_secret_diagnostic(self) -> None:
         output_stream = io.BytesIO()
         errors = io.StringIO()
-        code = native_host.run_host(
-            stdin=io.BytesIO(b"\x03\x00"),
-            stdout=output_stream,
-            stderr=errors,
-        )
+        # This test targets frame diagnostics, so it must not depend on whether
+        # the developer machine happens to have an installed Host config.
+        with mock.patch.object(native_host, "load_config", return_value=self.config):
+            code = native_host.run_host(
+                stdin=io.BytesIO(b"\x03\x00"),
+                stdout=output_stream,
+                stderr=errors,
+            )
         self.assertEqual(code, 2)
         output_stream.seek(0)
         self.assertEqual(native_host.read_frame(output_stream), b'{"status":"rejected_invalid"}')
