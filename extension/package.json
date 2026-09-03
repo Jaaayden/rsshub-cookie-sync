@@ -1,0 +1,8 @@
+{
+  "name": "rsshub-cookie-sync-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

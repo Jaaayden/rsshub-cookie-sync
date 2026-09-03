@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+# This file is installed root-owned at /usr/local/sbin and used as the only
+# command permitted by the rsshub-sync SSH forced-command account.
+if [ "${SSH_ORIGINAL_COMMAND:-}" != "" ]; then
+    exit 64
+fi
+if [ "$#" -ne 0 ]; then
+    exit 64
+fi
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+    /usr/bin/python3 /usr/local/lib/rsshub-cookie-sync/rsshub_cookie_sync.py \
+    --config /etc/rsshub-cookie-sync/config.json apply

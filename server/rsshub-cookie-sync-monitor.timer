@@ -1,0 +1,12 @@
+[Unit]
+Description=Run RSSHub Cookie monitor every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=rsshub-cookie-sync-monitor.service
+
+[Install]
+WantedBy=timers.target

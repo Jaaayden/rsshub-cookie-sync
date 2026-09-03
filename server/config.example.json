@@ -1,0 +1,27 @@
+{
+  "rsshub": {
+    "base_url": "http://127.0.0.1:1200",
+    "health_path": "/healthz",
+    "access_key": null
+  },
+  "providers": {
+    "zhihu": {
+      "me_url": "https://www.zhihu.com/api/v4/me?include=is_realname",
+      "moments_url": "https://www.zhihu.com/api/v3/moments?desktop=true&limit=1"
+    },
+    "weibo": {
+      "config_url": "https://m.weibo.cn/api/config"
+    }
+  },
+  "timeouts": {
+    "provider_seconds": 20,
+    "health_seconds": 90,
+    "health_poll_seconds": 1
+  },
+  "moments_interval_seconds": 3600,
+  "notification_cooldown": 21600,
+  "bark": {
+    "base_url": "https://api.day.app",
+    "device_key": null
+  }
+}

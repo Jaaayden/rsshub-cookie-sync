@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RSSHub Cookie Sync</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <div>
+          <h1>RSSHub Cookie Sync</h1>
+          <p class="subtitle">知乎 · 微博登录态同步</p>
+        </div>
+        <label class="switch" title="启用或暂停自动同步">
+          <input id="enabled" type="checkbox" aria-label="启用自动同步">
+          <span class="slider" aria-hidden="true"></span>
+        </label>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+      <section aria-labelledby="providers-title">
+        <h2 id="providers-title">同步状态</h2>
+        <div id="providers" class="providers"></div>
+      </section>
+
+      <div class="actions">
+        <button id="grant" class="secondary" type="button">授权站点权限</button>
+        <button id="refresh" class="secondary" type="button">刷新状态</button>
+        <button id="sync" class="primary" type="button">立即同步</button>
+      </div>
+
+      <p class="privacy">Cookie 只在内存中读取并通过 Native Messaging 发送，不会保存到扩展存储。</p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

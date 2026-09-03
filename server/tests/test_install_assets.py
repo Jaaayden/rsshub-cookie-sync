@@ -1,0 +1,180 @@
+"""Static checks for the server installation assets.
+
+These checks intentionally inspect the shipped files instead of invoking the
+installer.  Running an installer would require a real root/systemd/Docker
+environment and could mutate the host; syntax and source-level invariants are
+the useful, deterministic checks for these assets.
+"""
+
+import os
+import re
+import stat
+import subprocess
+import unittest
+from pathlib import Path
+
+
+SERVER_DIR = Path(__file__).resolve().parents[1]
+INSTALL_SCRIPT = SERVER_DIR / "install.sh"
+UNINSTALL_SCRIPT = SERVER_DIR / "uninstall.sh"
+WRAPPER_SCRIPTS = (
+    SERVER_DIR / "rsshub-cookie-sync",
+    SERVER_DIR / "rsshub-cookie-sync-apply",
+    SERVER_DIR / "provision-ssh-key.sh",
+)
+CONFIG_WRAPPERS = WRAPPER_SCRIPTS[:2]
+SHELL_ASSETS = (INSTALL_SCRIPT, UNINSTALL_SCRIPT, *WRAPPER_SCRIPTS)
+SERVICE_UNIT = SERVER_DIR / "rsshub-cookie-sync-monitor.service"
+
+
+class InstallAssetTests(unittest.TestCase):
+    @staticmethod
+    def _source(path: Path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    def test_shell_assets_have_valid_sh_syntax(self):
+        """Every installer, uninstaller, and shell wrapper parses as POSIX sh."""
+        for path in SHELL_ASSETS:
+            with self.subTest(asset=path.name):
+                completed = subprocess.run(
+                    ["sh", "-n", str(path)],
+                    cwd=SERVER_DIR,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    msg=f"{path.name} failed sh -n:\n{completed.stderr}",
+                )
+
+    def test_shell_assets_are_executable(self):
+        """The files copied or used as command entry points are executable."""
+        for path in SHELL_ASSETS:
+            with self.subTest(asset=path.name):
+                mode = path.stat().st_mode
+                self.assertTrue(
+                    mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH),
+                    f"{path.name} must have an executable bit",
+                )
+                self.assertTrue(os.access(path, os.X_OK), f"{path.name} is not executable")
+
+    def test_install_exposes_explicit_deployment_options(self):
+        """The target deployment is selected through the install CLI."""
+        source = self._source(INSTALL_SCRIPT)
+        options = (
+            "--compose-file",
+            "--project-name",
+            "--service-name",
+            "--rsshub-base-url",
+            "--replace-deployment",
+        )
+        for option in options:
+            with self.subTest(option=option):
+                # Keep both the user-facing contract and the parser branch
+                # covered; a help-only option is not enough here.
+                self.assertIn(option, source)
+                self.assertRegex(
+                    source,
+                    rf"(?m)^\s*{re.escape(option)}(?:\s|$)",
+                    msg=f"{option} is missing from install.sh usage",
+                )
+                self.assertRegex(
+                    source,
+                    rf"(?m)^\s*{re.escape(option)}\)",
+                    msg=f"{option} is missing from install.sh argument parsing",
+                )
+
+    def test_install_has_no_machine_specific_deployment_defaults(self):
+        """The installer must not point at a private RSSHub deployment."""
+        source = self._source(INSTALL_SCRIPT)
+        self.assertNotIn("/root/rsshub", source)
+
+        # A loopback default is intentionally safe and is the only URL literal
+        # allowed in this local-only installer.  Any public/private host or
+        # deployment hostname must arrive through --rsshub-base-url.
+        # Match URL-shaped literals only; ``http://*)`` in a shell case
+        # pattern is syntax, not an embedded address.
+        url_literals = re.findall(
+            r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::[0-9]{1,5})?",
+            source,
+        )
+        for literal in url_literals:
+            self.assertRegex(
+                literal,
+                r"^http://(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::[0-9]{1,5})?$",
+                msg=f"machine-specific URL embedded in install.sh: {literal}",
+            )
+
+    def test_units_and_wrappers_pass_explicit_config(self):
+        """Runtime entry points do not depend on an ambient config path."""
+        assets = (SERVICE_UNIT, *CONFIG_WRAPPERS)
+        for path in assets:
+            with self.subTest(asset=path.name):
+                source = self._source(path)
+                self.assertRegex(source, r"(?:^|[\s\\])--config(?:[\s\\]|$)")
+                self.assertIn("--config /etc/rsshub-cookie-sync/config.json", source)
+
+    def test_base_service_unit_has_no_fixed_read_write_paths(self):
+        """Writable deployment paths belong in the generated drop-in."""
+        source = self._source(SERVICE_UNIT)
+        self.assertNotRegex(source, r"(?mi)^\s*ReadWritePaths\s*=")
+        self.assertNotIn("ReadWritePaths=", source)
+
+    def test_install_bootstraps_only_when_migration_is_pending(self):
+        """Reinstalling an already migrated deployment must not recreate RSSHub."""
+        source = self._source(INSTALL_SCRIPT)
+        bootstrap_calls = list(re.finditer(r"\bbootstrap\s+--json\b", source))
+        self.assertEqual(
+            len(bootstrap_calls),
+            1,
+            "install.sh should have exactly one bootstrap invocation",
+        )
+
+        migration_guard = re.search(
+            r"(?ms)^\s*if\s+\[\s+\"\$migration_pending\"\s*=\s*true\s+\];\s*then\n(?P<body>.*?)^\s*fi\s*$",
+            source,
+        )
+        self.assertIsNotNone(
+            migration_guard,
+            "bootstrap must be guarded by migration_pending=true",
+        )
+        assert migration_guard is not None
+        self.assertIn("bootstrap --json", migration_guard.group("body"))
+        self.assertLess(
+            source.find("migration_pending=$("),
+            migration_guard.start(),
+            "migration_pending must be computed before bootstrap",
+        )
+
+    def test_uninstall_preserves_state_and_compose_secrets(self):
+        """Uninstall removes the synchronizer but leaves rollback/runtime data."""
+        source = self._source(UNINSTALL_SCRIPT)
+
+        # The uninstall path is intentionally independent of the selected
+        # Compose directory, so it must not introduce deletion targets for
+        # either the persistent state directory or Compose-managed secrets.
+        self.assertNotIn("/var/lib/rsshub-cookie-sync", source)
+        self.assertNotRegex(source, r"(?i)\b(?:STATE_DIR|SECRETS_DIR|LIVE_ENV|CANDIDATE_DIR)\b")
+        self.assertRegex(source, r"(?i)state.*(?:retain|left untouched|untouched)")
+        self.assertRegex(source, r"(?i)(?:secret|secrets).*?(?:retain|left untouched|untouched)")
+
+        deletion_lines = []
+        for line in source.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if re.search(r"\b(?:rm|rmdir)\b", stripped):
+                deletion_lines.append(stripped)
+        self.assertTrue(deletion_lines, "uninstall.sh should have explicit managed cleanup")
+        for line in deletion_lines:
+            with self.subTest(deletion=line):
+                self.assertNotRegex(
+                    line,
+                    r"(?i)(?:rsshub\.env|/secrets(?:/|\b)|candidates|/var/lib/rsshub-cookie-sync)",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

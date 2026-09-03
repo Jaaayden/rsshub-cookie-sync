@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+test-state/
+secrets/
+*.cookie
+*.env
+*.txn.json
+*.prev

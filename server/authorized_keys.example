@@ -1,0 +1,3 @@
+# Replace the public key below with the dedicated Edge/Mac sync key.  Keep the
+# forced command exact; no shell, forwarding, agent, or PTY is permitted.
+command="sudo -n /usr/local/sbin/rsshub-cookie-sync-apply",restrict ssh-ed25519 REPLACE_WITH_PUBLIC_KEY rsshub-cookie-sync

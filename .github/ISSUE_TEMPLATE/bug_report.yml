@@ -1,0 +1,97 @@
+name: Bug 报告
+description: 报告可复现的功能问题或部署问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请先确认下方内容中没有真实凭据。
+
+        **禁止提交** Cookie、Token、Authorization 请求头、Bark Device Key、完整 Bark URL、SSH 私钥、未经脱敏的 `known_hosts`、公网地址与登录信息组合，以及包含这些内容的完整日志。若这是安全漏洞，请关闭本表单并使用仓库 Security 页面的私密漏洞报告入口。
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: 脱敏确认
+      description: 发布前请再次检查所有字段、附件和截图。
+      options:
+        - label: 我确认没有提交 Cookie、Token、Bark Device Key、SSH 私钥或其他敏感凭据。
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 项目版本
+      description: 填写 GitHub Release 版本或提交短哈希，不要填写任何凭据。
+      placeholder: 例如 v1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 受影响组件
+      options:
+        - 服务端
+        - Edge 扩展
+        - Native Messaging Host
+        - 安装或卸载脚本
+        - GitHub Actions / 打包
+        - 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 脱敏环境
+      description: 请填写操作系统、Python/Node.js 版本、Edge 版本、Docker Compose 版本和部署方式。地址、用户名、项目路径请使用占位符。
+      placeholder: |
+        OS: Ubuntu 24.04
+        Python: 3.12
+        Node.js: 20.x
+        Edge: 版本号
+        Docker Compose: v2.x
+        部署方式: systemd / 手动
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请给出最小、可复现的步骤；不要粘贴请求头或密钥文件内容。
+      placeholder: |
+        1. 执行了什么脱敏后的命令
+        2. 看到了什么结果
+        3. 重复后是否仍然发生
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 请描述你认为应该发生什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 只粘贴状态码、分类原因和时间等脱敏信息。提交前删除 Cookie、Token、Authorization、Bark URL、路径中的用户名及完整上游响应。
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 其他信息
+      description: 可以附上脱敏截图或补充说明；请勿附加配置文件、密钥文件或包含凭据的网络请求。
+    validations:
+      required: false

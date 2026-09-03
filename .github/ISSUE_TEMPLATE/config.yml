@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（请勿公开提交）
+    url: https://github.com/Jaaayden/rsshub-cookie-sync/security/advisories/new
+    about: 请在仓库 Security 页面使用 Report a vulnerability，通过私密渠道提交安全问题；不要填写 Cookie、Token、Device Key 或 SSH 私钥。

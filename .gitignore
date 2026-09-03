@@ -1,0 +1,51 @@
+# 本地依赖与构建产物
+node_modules/
+dist/
+build/
+coverage/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地配置与秘密（不要提交任何真实 Cookie、Bark key 或 SSH 私钥）
+.env
+.env.*
+!.env.example
+secrets/
+config.local.json
+config.json
+rsshub.env
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+id_ed25519
+id_ed25519.pub
+authorized_keys
+known_hosts
+known_hosts.*
+
+# 运行时状态、候选 Cookie 和事务备份
+state/
+var/
+runtime/
+*.state.json
+*.candidate
+*.cookie
+*.prev
+*.next
+*.tmp
+*.txn.json
+*.pre-cookie-sync*
+
+# 系统与编辑器文件
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo

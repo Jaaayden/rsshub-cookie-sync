@@ -1,0 +1,5 @@
+# Install as /etc/sudoers.d/rsshub-cookie-sync (mode 0440).
+# NOSETENV prevents an SSH client from adding environment variables to the
+# root wrapper.  The wrapper itself rejects SSH_ORIGINAL_COMMAND and arguments.
+Defaults!/usr/local/sbin/rsshub-cookie-sync-apply !setenv
+rsshub-sync ALL=(root) NOPASSWD:NOSETENV: /usr/local/sbin/rsshub-cookie-sync-apply
