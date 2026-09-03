@@ -642,7 +642,7 @@ migration_started=1
 migration_json=$(/usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
     --config "$CONFIG_FILE" migrate-compose --json)
 migration_pending=$(printf '%s\n' "$migration_json" | /usr/bin/python3 -c \
-    'import json,sys; value=json.load(sys.stdin); pending=value.get("migration_pending"); raise SystemExit(2) if type(pending) is not bool else print("true" if pending else "false")')
+    'import json,sys; value=json.load(sys.stdin); pending=value.get("migration_pending"); type(pending) is bool or sys.exit(2); print("true" if pending else "false")')
 chmod 0600 "$COMPOSE_FILE" "$LIVE_ENV"
 
 # A finalized installation reports already_migrated and must not recreate

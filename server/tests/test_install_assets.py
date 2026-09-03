@@ -25,6 +25,12 @@ WRAPPER_SCRIPTS = (
 CONFIG_WRAPPERS = WRAPPER_SCRIPTS[:2]
 SHELL_ASSETS = (INSTALL_SCRIPT, UNINSTALL_SCRIPT, *WRAPPER_SCRIPTS)
 SERVICE_UNIT = SERVER_DIR / "rsshub-cookie-sync-monitor.service"
+MIGRATION_PENDING_PARSER = (
+    'import json,sys; value=json.load(sys.stdin); '
+    'pending=value.get("migration_pending"); '
+    'type(pending) is bool or sys.exit(2); '
+    'print("true" if pending else "false")'
+)
 
 
 class InstallAssetTests(unittest.TestCase):
@@ -147,6 +153,29 @@ class InstallAssetTests(unittest.TestCase):
             migration_guard.start(),
             "migration_pending must be computed before bootstrap",
         )
+
+    def test_migration_pending_parser_handles_reinstall_result(self):
+        """The shell parser must accept both pending and already-migrated JSON."""
+        source = self._source(INSTALL_SCRIPT)
+        self.assertIn(MIGRATION_PENDING_PARSER, source)
+
+        cases = (
+            ('{"migration_pending":true}\n', 0, "true\n"),
+            ('{"migration_pending":false}\n', 0, "false\n"),
+            ('{}\n', 2, ""),
+            ('{"migration_pending":"false"}\n', 2, ""),
+        )
+        for payload, expected_code, expected_output in cases:
+            with self.subTest(payload=payload):
+                completed = subprocess.run(
+                    ["python3", "-c", MIGRATION_PENDING_PARSER],
+                    input=payload,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, expected_code)
+                self.assertEqual(completed.stdout, expected_output)
 
     def test_uninstall_preserves_state_and_compose_secrets(self):
         """Uninstall removes the synchronizer but leaves rollback/runtime data."""
