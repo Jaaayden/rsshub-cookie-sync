@@ -15,6 +15,7 @@ test('manifest requests only the intended APIs and exact optional cookie-domain 
     'nativeMessaging',
     'storage',
   ]);
+  assert.deepEqual(manifest.optional_permissions, ['clipboardWrite']);
   assert.deepEqual([...manifest.optional_host_permissions].sort(), [
     'https://m.weibo.cn/*',
     'https://weibo.cn/*',

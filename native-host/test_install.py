@@ -24,7 +24,6 @@ class InstallTests(unittest.TestCase):
         self.edge_dir = self.root / "Microsoft Edge" / "NativeMessagingHosts"
         self.extension_id = "abcdefghijklmnop" * 2
         self.server_host = "rsshub.example.test"
-        self.proxy_host = "proxy.example.test"
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -58,10 +57,13 @@ class InstallTests(unittest.TestCase):
             )
 
     def test_install_with_existing_key_is_local_and_atomic(self) -> None:
-        ssh_dir = self.app_dir / "ssh"
+        ssh_dir = self.root / ".ssh"
         ssh_dir.mkdir(parents=True)
-        identity = ssh_dir / "id_ed25519"
+        identity = ssh_dir / "rsshub-cookie-sync"
         identity.write_text("private", encoding="ascii")
+        identity.with_name(identity.name + ".pub").write_text(
+            "ssh-ed25519 AAAA test\n", encoding="ascii"
+        )
         identity.chmod(0o600)
         source_known_hosts = self.root / "known_hosts.source"
         source_known_hosts.write_text(
@@ -75,6 +77,7 @@ class InstallTests(unittest.TestCase):
                 edge_manifest_dir=self.edge_dir,
                 known_hosts_source=source_known_hosts,
                 server_host=self.server_host,
+                identity_file=identity,
                 no_generate_key=True,
                 allowed_root=self.root,
             )
@@ -83,6 +86,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(paths["config_path"].stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(paths["manifest_path"].stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(paths["host_path"].stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(paths["launcher_path"].stat().st_mode), 0o700)
         installed_host = paths["host_path"].read_text(encoding="utf-8")
         self.assertTrue(installed_host.startswith("#!/usr/bin/env python3\n\"\"\"Microsoft Edge Native Messaging host"))
         self.assertIn("def run_host(", installed_host)
@@ -90,9 +94,15 @@ class InstallTests(unittest.TestCase):
         config = json.loads(paths["config_path"].read_text(encoding="utf-8"))
         self.assertEqual(config["host_name"], "com.jayden.rsshub_cookie_sync")
         self.assertEqual(config["server"]["host"], self.server_host)
-        self.assertIsNone(config["proxy"])
+        self.assertNotIn("proxy", config)
+        self.assertEqual(config["ssh"]["identity_file"], str(identity))
+        self.assertEqual(config["ssh"]["known_hosts_file"], str(self.root / ".ssh" / "known_hosts"))
         manifest = json.loads(paths["manifest_path"].read_text(encoding="utf-8"))
         self.assertEqual(manifest["allowed_origins"], [f"chrome-extension://{self.extension_id}/"])
+        self.assertEqual(manifest["path"], str(paths["launcher_path"]))
+        launcher = paths["launcher_path"].read_text(encoding="utf-8")
+        self.assertIn(str(Path(os.sys.executable).resolve()), launcher)
+        self.assertIn('"$@"', launcher)
 
     def test_key_generation_uses_ssh_keygen_without_shell(self) -> None:
         def fake_keygen(argv: list[str], **kwargs: object) -> CompletedProcess[object]:
@@ -121,7 +131,7 @@ class InstallTests(unittest.TestCase):
         run.assert_called_once()
         call = run.call_args
         self.assertFalse(call.kwargs["shell"])
-        self.assertEqual(stat.S_IMODE((self.app_dir / "ssh" / "id_ed25519").stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.root / ".ssh" / "rsshub-cookie-sync").stat().st_mode), 0o600)
 
     def test_uninstall_only_removes_managed_files(self) -> None:
         ssh_dir = self.app_dir / "ssh"
@@ -129,6 +139,7 @@ class InstallTests(unittest.TestCase):
         for name in ("id_ed25519", "id_ed25519.pub", "known_hosts"):
             (ssh_dir / name).write_text("x", encoding="ascii")
         (self.app_dir / "native_host.py").write_text("x", encoding="ascii")
+        (self.app_dir / "native_host").write_text("x", encoding="ascii")
         # Even a modified installer config must not redirect uninstall to
         # another file under Application Support.
         (self.app_dir / "config.json").write_text(
@@ -146,52 +157,132 @@ class InstallTests(unittest.TestCase):
             edge_manifest_dir=self.edge_dir,
             allowed_root=self.root,
         )
-        self.assertEqual(len(removed), 6)
+        self.assertEqual(len(removed), 7)
         self.assertTrue(unrelated.exists())
         self.assertFalse(manifest.exists())
         self.assertFalse((self.app_dir / "native_host.py").exists())
+        self.assertFalse((self.app_dir / "native_host").exists())
 
-    def test_proxy_is_opt_in_and_requires_both_endpoint_options(self) -> None:
+    def test_config_has_no_proxy_section(self) -> None:
         config = install.build_config(
-            identity_file=self.app_dir / "ssh" / "id_ed25519",
-            known_hosts_file=self.app_dir / "ssh" / "known_hosts",
+            identity_file=self.root / ".ssh" / "rsshub-cookie-sync",
+            known_hosts_file=self.root / ".ssh" / "known_hosts",
             server_host=self.server_host,
         )
-        self.assertIsNone(config["proxy"])
+        self.assertNotIn("proxy", config)
 
-        proxied = install.build_config(
-            identity_file=self.app_dir / "ssh" / "id_ed25519",
-            known_hosts_file=self.app_dir / "ssh" / "known_hosts",
-            server_host=self.server_host,
-            proxy_host=self.proxy_host,
-            proxy_port=6153,
-        )
-        self.assertEqual(
-            proxied["proxy"],
-            {"type": "socks5", "host": self.proxy_host, "port": 6153},
-        )
+    def test_zero_argument_cli_uses_public_defaults(self) -> None:
+        args = install._parse_args([])
+        self.assertEqual(args.extension_id, install.DEFAULT_EXTENSION_ID)
+        self.assertIsNone(args.server_host)
+        self.assertIsNone(args.server_port)
+        self.assertIsNone(args.server_user)
+        self.assertIsNone(args.identity_file)
 
-        for kwargs in (
-            {"proxy_host": self.proxy_host},
-            {"proxy_port": 6153},
-        ):
-            with self.subTest(kwargs=kwargs), self.assertRaises(install.InstallError):
-                install.build_config(
-                    identity_file=self.app_dir / "ssh" / "id_ed25519",
-                    known_hosts_file=self.app_dir / "ssh" / "known_hosts",
-                    server_host=self.server_host,
-                    **kwargs,
-                )
-
-    def test_server_host_is_required_by_cli(self) -> None:
-        with self.assertRaises(SystemExit):
-            install._parse_args(["--extension-id", self.extension_id])
         args = install._parse_args(
             ["--extension-id", self.extension_id, "--server-host", self.server_host]
         )
         self.assertEqual(args.server_host, self.server_host)
-        self.assertIsNone(args.proxy_host)
-        self.assertIsNone(args.proxy_port)
+        self.assertIsNone(args.identity_file)
+
+    def test_zero_argument_install_creates_default_key_and_unconfigured_server(self) -> None:
+        def fake_keygen(argv: list[str], **kwargs: object) -> CompletedProcess[object]:
+            key_path = Path(argv[argv.index("-f") + 1])
+            key_path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+            key_path.with_name(f"{key_path.name}.pub").write_text(
+                "ssh-ed25519 AAAA test\n", encoding="ascii"
+            )
+            return CompletedProcess(argv, 0)
+
+        with mock.patch.object(install.subprocess, "run", side_effect=fake_keygen):
+            paths = install.install(
+                app_support_dir=self.app_dir,
+                edge_manifest_dir=self.edge_dir,
+                allowed_root=self.root,
+            )
+        self.assertEqual(paths["identity_file"], self.root / ".ssh" / "rsshub-cookie-sync")
+        self.assertFalse(paths["server_configured"])
+        config = json.loads(paths["config_path"].read_text(encoding="utf-8"))
+        self.assertIsNone(config["server"]["host"])
+        self.assertNotIn("proxy", config)
+        self.assertEqual(
+            json.loads(paths["manifest_path"].read_text(encoding="utf-8"))["allowed_origins"],
+            [f"chrome-extension://{install.DEFAULT_EXTENSION_ID}/"],
+        )
+        self.assertEqual(stat.S_IMODE(paths["identity_file"].stat().st_mode), 0o600)
+
+    def test_reinstall_preserves_existing_server_legacy_identity_and_removes_proxy(self) -> None:
+        legacy_ssh = self.app_dir / "ssh"
+        legacy_ssh.mkdir(parents=True)
+        legacy_key = legacy_ssh / "id_ed25519"
+        legacy_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        legacy_key.with_name("id_ed25519.pub").write_text(
+            "ssh-ed25519 AAAA legacy\n", encoding="ascii"
+        )
+        legacy_key.chmod(0o600)
+        legacy_known_hosts = legacy_ssh / "known_hosts"
+        legacy_known_hosts.write_text(
+            f"[{self.server_host}]:2222 ssh-ed25519 AAAA\n", encoding="ascii"
+        )
+        legacy_known_hosts.chmod(0o600)
+        config_path = self.app_dir / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "host_name": install.HOST_NAME,
+                    "server": {"host": self.server_host, "port": 2222, "user": "old-user"},
+                    "proxy": {"type": "socks5", "host": "old-proxy", "port": 1080},
+                    "ssh": {
+                        "identity_file": str(legacy_key),
+                        "known_hosts_file": str(legacy_known_hosts),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+
+        with mock.patch.object(install.subprocess, "run") as run:
+            paths = install.install(
+                app_support_dir=self.app_dir,
+                edge_manifest_dir=self.edge_dir,
+                allowed_root=self.root,
+                no_generate_key=True,
+            )
+        run.assert_not_called()
+        self.assertEqual(paths["identity_file"], legacy_key)
+        self.assertEqual(paths["known_hosts_file"], legacy_known_hosts)
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(config["server"], {"host": self.server_host, "port": 2222, "user": "old-user"})
+        self.assertEqual(config["ssh"]["identity_file"], str(legacy_key))
+        self.assertNotIn("proxy", config)
+
+    def test_identity_file_must_be_direct_child_of_ssh_directory(self) -> None:
+        with self.assertRaises(install.InstallError):
+            install._identity_path(self.root / "outside-key", home=self.root)
+        with self.assertRaises(install.InstallError):
+            install._identity_path(self.root / ".ssh" / "nested" / "key", home=self.root)
+
+    def test_existing_known_hosts_is_merged_not_replaced(self) -> None:
+        destination = self.root / ".ssh" / "known_hosts"
+        destination.parent.mkdir(parents=True)
+        destination.write_text("other.example ssh-ed25519 BBBB\n", encoding="ascii")
+        source = self.root / "known_hosts.source"
+        source.write_text(
+            f"[{self.server_host}]:22 ssh-ed25519 AAAA\n", encoding="ascii"
+        )
+        self.assertTrue(
+            install._ensure_known_hosts(
+                destination,
+                source,
+                server_host=self.server_host,
+                server_port=22,
+            )
+        )
+        value = destination.read_text(encoding="ascii")
+        self.assertIn("other.example", value)
+        self.assertIn(self.server_host, value)
 
     def test_custom_install_roots_cannot_target_broad_or_external_directories(self) -> None:
         with self.assertRaises(install.InstallError):

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RSSHub Cookie Sync · 连接设置</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <div>
+          <h1>连接设置</h1>
+          <p class="subtitle">选择要连接的 RSSHub 服务器和 SSH 密钥</p>
+        </div>
+        <button id="refresh" class="secondary" type="button">重新读取设置</button>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+      <form id="settings-form" novalidate>
+        <label class="field">
+          <span>服务器地址</span>
+          <input id="server-host" name="host" type="text" inputmode="url" autocomplete="off" placeholder="例如 rsshub.example.com" required>
+          <small>填写运行 RSSHub 的服务器域名或 IPv4 地址。</small>
+        </label>
+
+        <label class="field compact-field">
+          <span>SSH 端口</span>
+          <input id="server-port" name="port" type="number" min="1" max="65535" step="1" value="22" required>
+          <small>一般保持默认值 22；连接账号固定为安装器创建的 <code>rsshub-sync</code>。</small>
+        </label>
+
+        <label class="field">
+          <span>SSH 密钥文件名</span>
+          <select id="identity-name" name="identityName" required>
+            <option value="rsshub-cookie-sync">rsshub-cookie-sync（默认）</option>
+          </select>
+          <small>只选择 <code>~/.ssh/</code> 下已有的文件名；私钥始终由本机 Native Host 使用，扩展无法读取它。</small>
+        </label>
+
+        <div class="actions">
+          <button id="save" class="primary" type="submit">保存连接设置</button>
+          <button id="cancel" class="secondary" type="button">返回</button>
+        </div>
+      </form>
+
+      <section class="security" aria-labelledby="security-title">
+        <h2 id="security-title">安全提示</h2>
+        <p>这些设置只保存在本机 Native Host，不会写入扩展存储。加载或刷新此页面不会读取 Cookie，也不会上传 Cookie。</p>
+      </section>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

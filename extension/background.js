@@ -11,6 +11,11 @@ import {
   sanitizeHostResult,
 } from './lib/protocol.js';
 import {
+  createGetNativeConfigMessage,
+  createSetNativeConfigMessage,
+  sanitizeNativeConfigResponse,
+} from './lib/native-config.js';
+import {
   DEFAULT_DEBOUNCE_MS,
   PERIODIC_SYNC_MINUTES,
   createDefaultState,
@@ -197,6 +202,43 @@ async function sendNativePayload(payload) {
   );
 }
 
+/**
+ * Send a non-Cookie control request to the Native Host.  Connection settings
+ * are deliberately kept in the host's local config file, not in extension
+ * storage; the control response is reduced before it reaches the options UI.
+ */
+async function sendNativeControl(payload) {
+  const response = await callChrome(
+    chromeContext().runtime.sendNativeMessage,
+    chromeContext().runtime,
+    NATIVE_HOST_NAME,
+    payload,
+  );
+  return sanitizeNativeConfigResponse(response);
+}
+
+async function getNativeConfig() {
+  try {
+    return await sendNativeControl(createGetNativeConfigMessage());
+  } catch {
+    return { ok: false, error: 'native_host_unavailable' };
+  }
+}
+
+async function setNativeConfig(config) {
+  let payload;
+  try {
+    payload = createSetNativeConfigMessage(config);
+  } catch {
+    return { ok: false, error: 'configuration_invalid' };
+  }
+  try {
+    return await sendNativeControl(payload);
+  } catch {
+    return { ok: false, error: 'native_host_unavailable' };
+  }
+}
+
 function localFailureResult(reason) {
   if (reason === 'permission_required') {
     return { status: 'permission_required', reason: 'permission_denied' };
@@ -280,6 +322,17 @@ function manualSync() {
   });
 }
 
+/**
+ * Read one provider's current Cookie only for an explicit popup copy action.
+ * This path intentionally does not hash, upload, or persist the header.
+ */
+async function cookieForCopy(provider) {
+  if (!PROVIDERS.includes(provider)) return { ok: false, error: 'invalid_provider' };
+  const collection = await collectProvider(provider);
+  if (collection.error) return { ok: false, error: collection.error };
+  return { ok: true, provider, cookieHeader: collection.header };
+}
+
 async function ensurePeriodicAlarm() {
   try {
     await invokeChrome(
@@ -351,6 +404,12 @@ async function handleMessage(message) {
   switch (message.type) {
     case 'get-status':
       return { ok: true, ...(await getStatus()) };
+    case 'get-native-config':
+      return getNativeConfig();
+    case 'set-native-config':
+      return setNativeConfig(message.config);
+    case 'copy-cookie':
+      return cookieForCopy(message.provider);
     case 'sync-now':
       await manualSync();
       return { ok: true, ...(await getStatus()) };

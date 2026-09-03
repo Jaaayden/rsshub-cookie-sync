@@ -84,6 +84,7 @@ fi
 for managed_file in \
     /usr/local/sbin/rsshub-cookie-sync-apply \
     /usr/local/sbin/rsshub-cookie-sync-provision-key \
+    /usr/local/sbin/rsshub-cookie-sync-uninstall \
     /etc/sudoers.d/rsshub-cookie-sync; do
     if [ -e "$managed_file" ] || [ -L "$managed_file" ]; then
         assert_removable_file "$managed_file"

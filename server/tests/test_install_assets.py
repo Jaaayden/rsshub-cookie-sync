@@ -15,7 +15,9 @@ from pathlib import Path
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = SERVER_DIR.parent
 INSTALL_SCRIPT = SERVER_DIR / "install.sh"
+BOOTSTRAP_SCRIPT = PROJECT_DIR / "scripts" / "install-server.sh"
 UNINSTALL_SCRIPT = SERVER_DIR / "uninstall.sh"
 WRAPPER_SCRIPTS = (
     SERVER_DIR / "rsshub-cookie-sync",
@@ -23,7 +25,7 @@ WRAPPER_SCRIPTS = (
     SERVER_DIR / "provision-ssh-key.sh",
 )
 CONFIG_WRAPPERS = WRAPPER_SCRIPTS[:2]
-SHELL_ASSETS = (INSTALL_SCRIPT, UNINSTALL_SCRIPT, *WRAPPER_SCRIPTS)
+SHELL_ASSETS = (INSTALL_SCRIPT, BOOTSTRAP_SCRIPT, UNINSTALL_SCRIPT, *WRAPPER_SCRIPTS)
 SERVICE_UNIT = SERVER_DIR / "rsshub-cookie-sync-monitor.service"
 MIGRATION_PENDING_PARSER = (
     'import json,sys; value=json.load(sys.stdin); '
@@ -95,7 +97,12 @@ class InstallAssetTests(unittest.TestCase):
     def test_install_has_no_machine_specific_deployment_defaults(self):
         """The installer must not point at a private RSSHub deployment."""
         source = self._source(INSTALL_SCRIPT)
-        self.assertNotIn("/root/rsshub", source)
+        # /root/rsshub is a documented discovery location, not a deployment
+        # identity.  The installer must still not embed any operator-specific
+        # server address or RSSHub URL.
+        self.assertIn("/root/rsshub/docker-compose.yml", source)
+        ipv4_literals = re.findall(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])", source)
+        self.assertEqual(set(ipv4_literals), {"127.0.0.1"})
 
         # A loopback default is intentionally safe and is the only URL literal
         # allowed in this local-only installer.  Any public/private host or
@@ -112,6 +119,56 @@ class InstallAssetTests(unittest.TestCase):
                 r"^http://(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::[0-9]{1,5})?$",
                 msg=f"machine-specific URL embedded in install.sh: {literal}",
             )
+
+    def test_install_has_simple_interactive_discovery_defaults(self):
+        """No-argument installs discover common files and use safe defaults."""
+        source = self._source(INSTALL_SCRIPT)
+        for location in (
+            '"$PWD/docker-compose.yml"',
+            '"$PWD/compose.yml"',
+            '"/opt/rsshub/docker-compose.yml"',
+            '"/root/rsshub/docker-compose.yml"',
+        ):
+            with self.subTest(location=location):
+                expected = location if location.startswith('"$PWD') else location[1:-1]
+                self.assertIn(expected, source)
+        self.assertIn("ORIGINAL_ARGC=$#", source)
+        self.assertIn('INTERACTIVE=1', source)
+        self.assertIn('< /dev/tty', source)
+        self.assertIn('PROJECT=rsshub', source)
+        self.assertIn('SERVICE=rsshub', source)
+        self.assertIn('RSSHUB_BASE_URL=http://127.0.0.1:1200', source)
+        self.assertNotIn('die "--compose-file is required"', source)
+
+    def test_server_bootstrap_downloads_source_and_keeps_prompts_on_tty(self):
+        """The curl|sudo entry point must fetch code and preserve interaction."""
+        source = self._source(BOOTSTRAP_SCRIPT)
+        self.assertIn("api.github.com/repos/Jaaayden/rsshub-cookie-sync/releases/latest", source)
+        self.assertNotIn("archive/refs/heads/main.tar.gz", source)
+        self.assertIn("mktemp -d /root/.rsshub-cookie-sync-install.", source)
+        self.assertNotIn("mktemp -d /tmp/", source)
+        self.assertIn("源码归档包含不安全路径", source)
+        self.assertIn("/dev/tty", self._source(INSTALL_SCRIPT))
+        self.assertIn("server/install.sh", source)
+
+    def test_interactive_install_resolves_the_real_compose_project(self):
+        """The default path detects projects and preserves saved custom values."""
+        source = self._source(INSTALL_SCRIPT)
+        self.assertIn("PROJECT_EXPLICIT=0", source)
+        self.assertIn('config --format json', source)
+        self.assertIn('value=json.load(sys.stdin).get("name")', source)
+        self.assertIn('PROJECT_EXPLICIT=1', source)
+        self.assertIn('saved_deployment=', source)
+        self.assertIn('PROJECT=$saved_project', source)
+        self.assertIn('SERVICE=$saved_service', source)
+        self.assertIn('RSSHUB_BASE_URL=$saved_base_url', source)
+
+    def test_installer_provides_a_stable_uninstall_command(self):
+        source = self._source(INSTALL_SCRIPT)
+        uninstall = self._source(UNINSTALL_SCRIPT)
+        fixed_path = "/usr/local/sbin/rsshub-cookie-sync-uninstall"
+        self.assertIn('"$SBIN_DIR/rsshub-cookie-sync-uninstall"', source)
+        self.assertIn(fixed_path, uninstall)
 
     def test_units_and_wrappers_pass_explicit_config(self):
         """Runtime entry points do not depend on an ambient config path."""

@@ -345,6 +345,17 @@ def validate_provider(provider: Any) -> str:
     return provider
 
 
+def build_manual_update_request(provider: Any, cookie_header: Any) -> Dict[str, Any]:
+    """Build one normal apply request from a hidden interactive Cookie input."""
+
+    provider_name = validate_provider(provider)
+    cookie = validate_cookie_header(cookie_header)
+    return {
+        "version": 1,
+        "providers": {provider_name: {"cookieHeader": cookie}},
+    }
+
+
 def _reject_duplicate_json_keys(pairs: Iterable[Tuple[str, Any]]) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     for key, value in pairs:
@@ -1023,6 +1034,14 @@ def _looks_like_auth_error(payload: Any) -> bool:
     return False
 
 
+def _valid_weibo_uid(value: Any) -> bool:
+    """Accept only a positive integer UID or its canonical decimal string."""
+
+    if type(value) is int:
+        return value > 0
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,31}", value) is not None
+
+
 class ProviderProber:
     def __init__(self, config: RuntimeConfig, transport: Optional[HTTPTransport] = None) -> None:
         self.config = config
@@ -1102,7 +1121,8 @@ class ProviderProber:
         payload = _response_json(response)
         if not isinstance(payload, dict):
             return ProbeResult("transient", response.status, "config_invalid_json")
-        if payload.get("ok") != 1:
+        ok_value = payload.get("ok")
+        if type(ok_value) is not int or ok_value != 1:
             if _looks_like_auth_error(payload):
                 return ProbeResult("auth_failed", response.status, "config_unauthorized")
             return ProbeResult("auth_failed", response.status, "config_not_ok")
@@ -1110,9 +1130,9 @@ class ProviderProber:
         login = data.get("login") if isinstance(data, dict) else None
         user = data.get("user") if isinstance(data, dict) else None
         uid = data.get("uid") if isinstance(data, dict) else None
-        if uid in (None, "", 0, "0") and isinstance(user, dict):
+        if not _valid_weibo_uid(uid) and isinstance(user, dict):
             uid = user.get("uid") or user.get("id")
-        if login is not True or uid in (None, "", 0, "0"):
+        if login is not True or not _valid_weibo_uid(uid):
             return ProbeResult("auth_failed", response.status, "config_logged_out")
         return ProbeResult("ok", response.status, "config_ok")
 
@@ -1138,6 +1158,10 @@ class CommandRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                 stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
+                env={
+                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "LC_ALL": "C",
+                },
                 timeout=timeout,
                 check=False,
                 text=True,
@@ -1653,16 +1677,17 @@ class SyncService:
             to_promote: Dict[str, str] = {}
             for provider in invalid_providers:
                 results[provider] = "rejected_invalid"
-                state["providers"][provider]["candidate_validation"] = "rejected_invalid"
             for provider, cookie in cookie_values.items():
                 result = self.prober.probe(provider, cookie, full=True)
                 if result.kind == "auth_failed":
                     results[provider] = "rejected_invalid"
-                    state["providers"][provider]["candidate_validation"] = "rejected_invalid"
                     continue
                 if result.kind != "ok":
                     results[provider] = "retryable_error"
-                    state["providers"][provider]["candidate_validation"] = "retryable_error"
+                    # A failed upload was never written as the candidate.  Do
+                    # not invalidate metadata for an older, verified file;
+                    # otherwise one bad or rate-limited upload could silently
+                    # remove the only available recovery path.
                     continue
                 key = COOKIE_KEYS[provider]
                 current = live_values.get(key, "")
@@ -1802,7 +1827,11 @@ class SyncService:
                                 provider + " 当前 Cookie 与候选 Cookie 均不可用，请在 Edge 重新登录。",
                             )
                         else:
-                            item["candidate_validation"] = "retryable_error"
+                            # A temporary failure does not contradict the last
+                            # successful validation.  Keep the candidate in
+                            # the retry queue so the next monitor cycle can
+                            # promote it after the upstream recovers.
+                            pass
                     else:
                         self._safe_notification(
                             state,
@@ -2080,12 +2109,41 @@ def _secret_assignment(line: str) -> Optional[Tuple[str, str]]:
     if mapping and mapping[1] in _COMPOSE_SECRET_KEYS:
         return mapping[1], _compose_scalar(mapping[2])
     stripped = line.strip()
+    # YAML permits quoted mapping keys.  Support only the three exact managed
+    # names; do not turn this conservative editor into a general YAML parser.
+    for key in _COMPOSE_SECRET_KEYS:
+        for quote in ("'", '"'):
+            prefix = f"{quote}{key}{quote}"
+            if stripped.startswith(prefix):
+                remainder = stripped[len(prefix) :].lstrip()
+                if remainder.startswith(":"):
+                    return key, _compose_scalar(remainder[1:])
     if stripped.startswith("-"):
-        item = stripped[1:].strip()
+        # Compose also accepts the complete KEY=value list scalar in quotes,
+        # for example `- "ZHIHU_COOKIES=z_c0=..."`.
+        raw_item = stripped[1:].strip()
+        whole_item_quoted = raw_item.startswith(("'", '"'))
+        item = _compose_scalar(raw_item)
         for key in _COMPOSE_SECRET_KEYS:
             if item.startswith(key + "="):
-                return key, _compose_scalar(item[len(key) + 1 :])
+                value = item[len(key) + 1 :]
+                return key, value if whole_item_quoted else _compose_scalar(value)
     return None
+
+
+def _looks_like_unparsed_secret_assignment(line: str) -> bool:
+    """Fail closed when a direct environment entry starts with a secret key."""
+
+    candidate = line.strip()
+    if candidate.startswith("-"):
+        candidate = candidate[1:].strip()
+    candidate = candidate.lstrip("'\"")
+    for key in _COMPOSE_SECRET_KEYS:
+        if candidate.startswith(key):
+            suffix = candidate[len(key) : len(key) + 1]
+            if not suffix or suffix in {"=", ":", " ", "\t", "'", '"'}:
+                return True
+    return False
 
 
 def _extract_rsshub_environment(
@@ -2135,6 +2193,8 @@ def _extract_rsshub_environment(
     for index, _, line in code:
         assignment = _secret_assignment(line)
         if assignment is None:
+            if _looks_like_unparsed_secret_assignment(line):
+                raise SyncError("configured service secret environment entry is ambiguous")
             if _compose_mapping(line) is None and not line.strip().startswith("-"):
                 raise SyncError("configured service environment entry is ambiguous")
             continue
@@ -2836,6 +2896,7 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         choices=(
             "apply",
+            "manual-update",
             "monitor",
             "status",
             "notify-test",
@@ -2860,6 +2921,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--service", default=None)
     parser.add_argument("--rsshub-base-url", default=None)
     parser.add_argument("--replace-deployment", action="store_true")
+    parser.add_argument("--provider", choices=PROVIDERS, help="manual-update 的目标服务")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出安全状态")
     return parser
 
@@ -2912,6 +2974,19 @@ def main(argv: Optional[Sequence[str]] = None, stdin: Any = None) -> int:
             return 0
         config = make_config(args)
         service = SyncService(config)
+        if args.command == "manual-update":
+            if args.provider is None:
+                raise InvalidInput("manual-update requires --provider")
+            if stdin is not None or not sys.stdin.isatty():
+                raise InvalidInput("manual-update requires an interactive terminal")
+            cookie_header = getpass.getpass(
+                f"{args.provider} Cookie（粘贴后按回车，内容不会回显）："
+            )
+            result = service.apply(build_manual_update_request(args.provider, cookie_header))
+            print(json.dumps(result, ensure_ascii=True, sort_keys=True))
+            if result.get("status") == "retryable_error":
+                return 75
+            return 0
         if args.command == "apply":
             payload = strict_json_from_stdin(stdin)
             result = service.apply(payload)

@@ -58,7 +58,7 @@ function fakeCookie(provider) {
   };
 }
 
-function makeChrome({ initialStorage = {}, deferStorageGet = false } = {}) {
+function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfigResponse = null } = {}) {
   const events = {
     installed: makeEvent(),
     startup: makeEvent(),
@@ -83,6 +83,19 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false } = {}) {
       onMessage: events.message,
       sendNativeMessage(hostName, payload, callback) {
         nativeMessages.push({ hostName, payload });
+        if (payload.action === 'get-config') {
+          callback(nativeConfigResponse ?? { ok: false, error: 'configuration_missing' });
+          return;
+        }
+        if (payload.action === 'set-config') {
+          callback(nativeConfigResponse ?? {
+            status: 'config_saved',
+            server: payload.server,
+            identityName: payload.identityName,
+            identities: [{ name: payload.identityName, legacy: false }],
+          });
+          return;
+        }
         const providers = {};
         for (const provider of Object.keys(payload.providers ?? {})) {
           providers[provider] = { status: 'candidate_saved', reason: 'ok' };
@@ -276,12 +289,12 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     assert.equal(
       fake.cookieReads.length,
       beforeRefreshStatus.cookieReads,
-      '刷新状态不得读取浏览器 Cookie',
+      '刷新扩展状态不得读取浏览器 Cookie',
     );
     assert.equal(
       fake.nativeMessages.length,
       beforeRefreshStatus.nativeMessages,
-      '刷新状态不得上传 Cookie 或触发 Native Messaging',
+      '刷新扩展状态不得上传 Cookie 或触发 Native Messaging',
     );
 
     const pausedResponse = await sendMessage(fake.events.message, {
@@ -343,6 +356,161 @@ test('冷启动时 Cookie 变化会先读取已暂停状态再决定是否安排
       0,
     );
     assert.equal(fake.nativeMessages.length, 0);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('复制 Cookie 只读取请求中的 provider，不上传、不持久化 Cookie', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome();
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?copy-cookie=${Date.now()}-${Math.random()}`);
+    await flush();
+
+    const beforeReads = fake.cookieReads.length;
+    const beforeNativeMessages = fake.nativeMessages.length;
+    const response = await sendMessage(fake.events.message, {
+      type: 'copy-cookie',
+      provider: 'zhihu',
+    });
+
+    assert.deepEqual(response, {
+      ok: true,
+      provider: 'zhihu',
+      cookieHeader: 'z_c0=zhihu-secret=a=b',
+    });
+    assert.equal(fake.cookieReads.length, beforeReads + 1);
+    assert.equal(fake.cookieReads.at(-1).url, 'https://www.zhihu.com/api/v3/moments');
+    assert.equal(fake.nativeMessages.length, beforeNativeMessages);
+
+    const invalid = await sendMessage(fake.events.message, {
+      type: 'copy-cookie',
+      provider: 'not-a-provider',
+    });
+    assert.deepEqual(invalid, { ok: false, error: 'invalid_provider' });
+    assert.equal(fake.cookieReads.length, beforeReads + 1, '未知服务不得读取 Cookie');
+
+    const stored = JSON.stringify(fake.storage);
+    assert.equal(stored.includes('zhihu-secret'), false);
+    assert.equal(stored.includes('cookieHeader'), false);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('复制 Cookie 的站点权限被拒绝时不读取目标 Cookie', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome();
+  fake.setPermissionsGranted(false);
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?copy-cookie-denied=${Date.now()}-${Math.random()}`);
+    await flush();
+
+    const response = await sendMessage(fake.events.message, {
+      type: 'copy-cookie',
+      provider: 'weibo',
+    });
+    assert.deepEqual(response, { ok: false, error: 'permission_required' });
+    assert.equal(fake.cookieReads.length, 0);
+    assert.equal(fake.nativeMessages.length, 0);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('连接设置通过 Native Host 控制消息读写，刷新不读取或上传 Cookie', async () => {
+  const previousChrome = globalThis.chrome;
+  const config = {
+    host: 'rsshub.example.test',
+    port: 2222,
+    user: 'rsshub-sync',
+    identityName: 'rsshub-cookie-sync',
+  };
+  const fake = makeChrome({
+    nativeConfigResponse: {
+      status: 'config',
+      server: {
+        host: config.host,
+        port: config.port,
+        user: config.user,
+      },
+      identityName: config.identityName,
+      identities: [
+        { name: config.identityName, legacy: false },
+        { name: 'another-key', legacy: false },
+      ],
+      cookieHeader: 'secret=must-not-reach-extension-state',
+    },
+  });
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?native-config=${Date.now()}-${Math.random()}`);
+    await flush();
+    const before = {
+      cookieReads: fake.cookieReads.length,
+      storage: JSON.stringify(fake.storage),
+    };
+
+    const loaded = await sendMessage(fake.events.message, { type: 'get-native-config' });
+    assert.deepEqual(loaded, {
+      ok: true,
+      config,
+      identities: [
+        { name: config.identityName, legacy: false },
+        { name: 'another-key', legacy: false },
+      ],
+    });
+    assert.deepEqual(fake.nativeMessages.at(-1).payload, {
+      version: 1,
+      action: 'get-config',
+    });
+    assert.equal(fake.cookieReads.length, before.cookieReads);
+    assert.equal(JSON.stringify(fake.storage), before.storage);
+
+    const saved = await sendMessage(fake.events.message, {
+      type: 'set-native-config',
+      config,
+    });
+    assert.deepEqual(saved, loaded);
+    assert.deepEqual(fake.nativeMessages.at(-1).payload, {
+      version: 1,
+      action: 'set-config',
+      server: {
+        host: config.host,
+        port: config.port,
+        user: config.user,
+      },
+      identityName: config.identityName,
+    });
+    assert.equal(fake.cookieReads.length, before.cookieReads);
+    assert.equal(JSON.stringify(fake.storage), before.storage);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('连接设置输入非法时不会启动 Native Host', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome();
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?native-config-invalid=${Date.now()}-${Math.random()}`);
+    await flush();
+    const before = fake.nativeMessages.length;
+    const response = await sendMessage(fake.events.message, {
+      type: 'set-native-config',
+      config: {
+        host: 'rsshub.example.test;bad',
+        port: 22,
+        user: 'rsshub-sync',
+        identityName: 'rsshub-cookie-sync',
+      },
+    });
+    assert.deepEqual(response, { ok: false, error: 'configuration_invalid' });
+    assert.equal(fake.nativeMessages.length, before);
   } finally {
     globalThis.chrome = previousChrome;
   }

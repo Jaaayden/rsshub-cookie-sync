@@ -27,11 +27,10 @@ class NativeHostTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.server_host = "rsshub.example.test"
-        self.proxy_host = "proxy.example.test"
         self.identity = root / "ssh" / "id_ed25519"
         self.known_hosts = root / "ssh" / "known_hosts"
         self.identity.parent.mkdir(mode=0o700)
-        self.identity.write_text("test private key", encoding="ascii")
+        self.identity.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
         self.known_hosts.write_text(
             f"[{self.server_host}]:22 ssh-ed25519 AAAA\n", encoding="ascii"
         )
@@ -39,13 +38,6 @@ class NativeHostTests(unittest.TestCase):
         os.chmod(self.known_hosts, 0o600)
         self.config = native_host.HostConfig(
             server_host=self.server_host,
-            identity_file=self.identity,
-            known_hosts_file=self.known_hosts,
-        )
-        self.proxied_config = native_host.HostConfig(
-            server_host=self.server_host,
-            proxy_host=self.proxy_host,
-            proxy_port=6153,
             identity_file=self.identity,
             known_hosts_file=self.known_hosts,
         )
@@ -84,6 +76,21 @@ class NativeHostTests(unittest.TestCase):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     native_host._parse_args(argv)
+
+    def test_installed_host_prefers_sibling_config_for_custom_install_directory(self) -> None:
+        custom = Path(self.temp_dir.name) / "custom" / "native_host.py"
+        custom.parent.mkdir()
+        fallback = Path(self.temp_dir.name) / "fallback.json"
+        self.assertEqual(
+            native_host._runtime_default_config_path(custom, fallback),
+            fallback,
+        )
+        sibling = custom.with_name("config.json")
+        sibling.write_text("{}", encoding="utf-8")
+        self.assertEqual(
+            native_host._runtime_default_config_path(custom, fallback),
+            sibling.resolve(),
+        )
 
     def test_frame_rejects_truncation_and_oversize(self) -> None:
         with self.assertRaises(native_host.ProtocolError):
@@ -131,7 +138,7 @@ class NativeHostTests(unittest.TestCase):
             native_host.validate_request(duplicate)
 
     def test_ssh_argv_is_explicit_and_contains_no_cookie(self) -> None:
-        argv = native_host.build_ssh_argv(self.proxied_config)
+        argv = native_host.build_ssh_argv(self.config)
         self.assertEqual(argv[0], "/usr/bin/ssh")
         self.assertIn("-T", argv)
         self.assertIn("-p", argv)
@@ -143,18 +150,9 @@ class NativeHostTests(unittest.TestCase):
         self.assertIn("HostKeyAlgorithms=ssh-ed25519", argv)
         self.assertIn("ControlMaster=no", argv)
         self.assertIn("ControlPath=none", argv)
-        self.assertTrue(any(item.startswith(f"ProxyCommand=/usr/bin/nc -x {self.proxy_host}:6153 -X 5") for item in argv))
         self.assertEqual(argv[-1], f"rsshub-sync@{self.server_host}")
         self.assertNotIn("z_c0=super-secret", argv)
-
-        direct = native_host.build_ssh_argv(self.config, use_proxy=False)
-        self.assertFalse(any(item.startswith("ProxyCommand=") for item in direct))
-        self.assertEqual(direct[-1], f"rsshub-sync@{self.server_host}")
-
-    def test_ssh_argv_without_proxy_is_direct_even_with_default_use_proxy(self) -> None:
-        argv = native_host.build_ssh_argv(self.config)
         self.assertFalse(any(item.startswith("ProxyCommand=") for item in argv))
-        self.assertEqual(argv[-1], f"rsshub-sync@{self.server_host}")
 
     def test_ssh_file_paths_are_quoted_for_openssh_config_parser(self) -> None:
         root = Path(self.temp_dir.name) / 'Application Support' / 'RSSHub Cookie Sync'
@@ -261,22 +259,6 @@ class NativeHostTests(unittest.TestCase):
             "retryable_error",
         )
 
-    def test_proxy_transport_failure_never_bypasses_explicit_proxy(self) -> None:
-        runner = mock.Mock(
-            return_value=CompletedProcess(
-                args=[], returncode=255, stdout=b"", stderr=b"proxy failed"
-            )
-        )
-
-        status = native_host.send_to_server(
-            {"weibo": {"cookieHeader": "sid=invalid"}}, self.proxied_config, runner=runner
-        )
-
-        self.assertEqual(status, "retryable_error")
-        runner.assert_called_once()
-        argv = runner.call_args.args[0]
-        self.assertTrue(any(item.startswith("ProxyCommand=") for item in argv))
-
     def test_remote_failure_is_not_replayed_directly(self) -> None:
         runner = mock.Mock(
             return_value=CompletedProcess(args=[], returncode=75, stdout=b'{"status":"retryable_error"}', stderr=b"")
@@ -289,7 +271,7 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual(status, "retryable_error")
         runner.assert_called_once()
 
-    def test_direct_transport_is_attempted_once_without_proxy(self) -> None:
+    def test_direct_transport_is_attempted_once(self) -> None:
         runner = mock.Mock(
             return_value=CompletedProcess(
                 args=[], returncode=255, stdout=b"", stderr=b"connection failed"
@@ -382,7 +364,7 @@ class NativeHostTests(unittest.TestCase):
         self.assertIsNone(native_host.read_frame(output_stream))
         self.assertEqual(fake_runner.call_count, 2)
 
-    def test_config_loader_requires_server_host_and_accepts_null_proxy(self) -> None:
+    def test_config_loader_requires_server_host_and_migrates_null_proxy(self) -> None:
         config = native_host.config_from_mapping(
             {
                 "schema_version": 1,
@@ -395,17 +377,275 @@ class NativeHostTests(unittest.TestCase):
             },
         )
         self.assertEqual(config.server_host, self.server_host)
-        self.assertIsNone(config.proxy_host)
-        self.assertIsNone(config.proxy_port)
 
-        with self.assertRaises(native_host.ConfigurationError):
-            native_host.config_from_mapping(
+        direct = native_host.config_from_mapping(
+            {
+                "schema_version": 1,
+                "server": {"host": self.server_host},
+                "proxy": {"type": "socks5", "host": "proxy.example", "port": 1080},
+                "ssh": {
+                    "identity_file": str(self.identity),
+                    "known_hosts_file": str(self.known_hosts),
+                },
+            },
+        )
+        self.assertEqual(direct.server_host, self.server_host)
+
+        unconfigured = native_host.config_from_mapping(
+            {
+                "schema_version": 1,
+                "server": {},
+                "proxy": {"type": "socks5", "host": "proxy.example", "port": 1080},
+                "ssh": {
+                    "identity_file": str(self.identity),
+                    "known_hosts_file": str(self.known_hosts),
+                },
+            },
+        )
+        self.assertIsNone(unconfigured.server_host)
+
+    def test_control_requests_are_strict_and_have_no_ssh_side_effect(self) -> None:
+        config_path = Path(self.temp_dir.name) / "Application Support" / "RSSHub Cookie Sync" / "config.json"
+        config_path.parent.mkdir(parents=True, mode=0o700)
+        config_path.write_text(
+            json.dumps(
                 {
                     "schema_version": 1,
-                    "server": {},
-                    "proxy": None,
+                    "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                    "proxy": {"type": "socks5", "host": "ignored", "port": 1080},
+                    "ssh": {
+                        "identity_file": str(self.identity),
+                        "known_hosts_file": str(self.known_hosts),
+                    },
                 }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        runner = mock.Mock()
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+            get_response = native_host.process_control_request(
+                b'{"version":1,"action":"get-config"}', config_path
             )
+            self.assertEqual(get_response["status"], "config")
+            self.assertEqual(get_response["server"]["host"], self.server_host)
+            self.assertEqual(get_response["identityName"], self.identity.name)
+            self.assertTrue(any(item["name"] == self.identity.name for item in get_response["identities"]))
+            encoded = json.dumps(get_response)
+            self.assertNotIn(str(self.identity), encoded)
+            self.assertNotIn("super-secret", encoded)
+
+            set_response = native_host.process_control_request(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "action": "set-config",
+                        "server": {"host": "new.example.test", "port": 2222, "user": "rsshub-sync"},
+                        "identityName": self.identity.name,
+                    }
+                ).encode("utf-8"),
+                config_path,
+            )
+        self.assertEqual(set_response["status"], "config_saved")
+        runner.assert_not_called()
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["server"], {"host": "new.example.test", "port": 2222, "user": "rsshub-sync"})
+        self.assertNotIn("proxy", saved)
+        self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+
+        invalid = (
+            {"version": 1, "action": "get-config", "extra": 1},
+            {
+                "version": 1,
+                "action": "set-config",
+                "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                "identityName": "../stolen",
+            },
+            {
+                "version": 1,
+                "action": "set-config",
+                "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                "identityName": "/tmp/key",
+            },
+            {
+                "version": 1,
+                "action": "set-config",
+                "server": {"host": self.server_host, "port": 22, "user": "root"},
+                "identityName": self.identity.name,
+            },
+        )
+        for message in invalid:
+            with self.subTest(message=message):
+                self.assertEqual(
+                    native_host.process_control_request(json.dumps(message).encode(), config_path),
+                    {"status": "rejected_invalid"},
+                )
+
+    def test_legacy_application_support_identity_is_selectable_as_legacy(self) -> None:
+        config_path = Path(self.temp_dir.name) / "Application Support" / "RSSHub Cookie Sync" / "config.json"
+        config_path.parent.mkdir(parents=True, mode=0o700)
+        legacy_dir = config_path.parent / "ssh"
+        legacy_dir.mkdir(mode=0o700)
+        legacy_key = legacy_dir / "id_ed25519"
+        legacy_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        legacy_key.chmod(0o600)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                    "ssh": {
+                        "identity_file": str(legacy_key),
+                        "known_hosts_file": str(self.known_hosts),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        response = native_host.process_control_request(
+            b'{"version":1,"action":"get-config"}', config_path
+        )
+        self.assertEqual(response["identityName"], native_host.LEGACY_IDENTITY_NAME)
+        self.assertIn(
+            {"name": native_host.LEGACY_IDENTITY_NAME, "legacy": True},
+            response["identities"],
+        )
+        self.assertNotIn(str(legacy_key), json.dumps(response))
+
+    def test_identity_scan_returns_only_safe_one_level_private_keys(self) -> None:
+        ssh_dir = self.identity.parent
+        extra = ssh_dir / "other-key"
+        extra.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        extra.chmod(0o600)
+        unsafe = ssh_dir / "unsafe-key"
+        unsafe.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        unsafe.chmod(0o644)
+        reserved = ssh_dir / native_host.LEGACY_IDENTITY_NAME
+        reserved.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        reserved.chmod(0o600)
+        nested = ssh_dir / "nested"
+        nested.mkdir(mode=0o700)
+        nested_key = nested / "nested-key"
+        nested_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        nested_key.chmod(0o600)
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", ssh_dir):
+            identities = native_host.scan_ssh_identities()
+        names = {item["name"] for item in identities}
+        self.assertIn("other-key", names)
+        self.assertNotIn("unsafe-key", names)
+        self.assertNotIn("nested-key", names)
+        self.assertNotIn(native_host.LEGACY_IDENTITY_NAME, names)
+        self.assertNotIn(str(extra), json.dumps(identities))
+
+    def test_control_rejects_safe_non_key_file_as_identity(self) -> None:
+        config_path = Path(self.temp_dir.name) / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                    "ssh": {
+                        "identity_file": str(self.identity),
+                        "known_hosts_file": str(self.known_hosts),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        message = json.dumps(
+            {
+                "version": 1,
+                "action": "set-config",
+                "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                "identityName": "known_hosts",
+            }
+        ).encode()
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+            self.assertEqual(
+                native_host.process_control_request(message, config_path),
+                {"status": "config_error"},
+            )
+
+    def test_get_config_suggests_an_available_key_when_selected_key_is_missing(self) -> None:
+        config_path = Path(self.temp_dir.name) / "config.json"
+        replacement = self.identity.parent / "rsshub-cookie-sync"
+        replacement.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="ascii")
+        replacement.chmod(0o600)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                    "ssh": {
+                        "identity_file": str(self.identity.parent / "removed-key"),
+                        "known_hosts_file": str(self.known_hosts),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+            response = native_host.process_control_request(
+                b'{"version":1,"action":"get-config"}', config_path
+            )
+        self.assertEqual(response["status"], "config")
+        self.assertEqual(response["identityName"], "rsshub-cookie-sync")
+        self.assertIn(
+            {"name": "rsshub-cookie-sync", "legacy": False},
+            response["identities"],
+        )
+
+    def test_control_response_is_framed_and_run_host_reloads_config(self) -> None:
+        config_path = Path(self.temp_dir.name) / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "server": {"host": self.server_host, "port": 22, "user": "rsshub-sync"},
+                    "ssh": {
+                        "identity_file": str(self.identity),
+                        "known_hosts_file": str(self.known_hosts),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        set_payload = json.dumps(
+            {
+                "version": 1,
+                "action": "set-config",
+                "server": {"host": "new.example.test", "port": 2022, "user": "rsshub-sync"},
+                "identityName": self.identity.name,
+            },
+            separators=(",", ":"),
+        ).encode()
+        sync_payload = self.request(zhihu={"cookieHeader": "a=1"})
+        output = io.BytesIO()
+        runner = mock.Mock(
+            return_value=CompletedProcess(args=[], returncode=0, stdout=b'{"status":"unchanged"}', stderr=b"")
+        )
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+            code = native_host.run_host(
+                config_path=config_path,
+                stdin=io.BytesIO(
+                    native_host.encode_frame(set_payload) + native_host.encode_frame(sync_payload)
+                ),
+                stdout=output,
+                stderr=io.StringIO(),
+                runner=runner,
+            )
+        self.assertEqual(code, 0)
+        output.seek(0)
+        first = json.loads(native_host.read_frame(output).decode())
+        second = json.loads(native_host.read_frame(output).decode())
+        self.assertEqual(first["status"], "config_saved")
+        self.assertEqual(second["status"], "unchanged")
+        self.assertEqual(runner.call_count, 1)
+        self.assertIn("rsshub-sync@new.example.test", runner.call_args.args[0])
 
     def test_invalid_frame_returns_rejected_status_without_secret_diagnostic(self) -> None:
         output_stream = io.BytesIO()

@@ -3,7 +3,7 @@
 
 The installer is intentionally local-only.  It never contacts the server and
 never runs ``ssh-keyscan``: the fixed server host key must be supplied by the
-operator through ``--known-hosts-source`` (or placed in the destination file
+operator through ``--known-hosts-source`` (or placed in ``~/.ssh/known_hosts``
 out of band) before the host can connect with StrictHostKeyChecking enabled.
 """
 
@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -28,7 +29,11 @@ try:
         MAX_CONNECT_TIMEOUT,
         DEFAULT_SERVER_PORT,
         DEFAULT_SERVER_USER,
+        DEFAULT_EXTENSION_ID,
         HOST_NAME,
+        ConfigurationError,
+        HostConfig,
+        load_config,
     )
 except ImportError:  # pragma: no cover - supports direct path execution
     from .native_host import (  # type: ignore
@@ -37,7 +42,11 @@ except ImportError:  # pragma: no cover - supports direct path execution
         MAX_CONNECT_TIMEOUT,
         DEFAULT_SERVER_PORT,
         DEFAULT_SERVER_USER,
+        DEFAULT_EXTENSION_ID,
         HOST_NAME,
+        ConfigurationError,
+        HostConfig,
+        load_config,
     )
 
 
@@ -49,7 +58,6 @@ DEFAULT_EDGE_MANIFEST_DIR = (
     / "NativeMessagingHosts"
 )
 DEFAULT_SSH_BINARY = "/usr/bin/ssh"
-DEFAULT_NC_BINARY = "/usr/bin/nc"
 EXTENSION_ID_LENGTH = 32
 
 
@@ -196,6 +204,35 @@ def _validate_binary(value: str, label: str) -> str:
     return value
 
 
+def _identity_path(value: Optional[Path], *, home: Optional[Path] = None) -> Path:
+    """Return a safe private-key path directly below the user's ``~/.ssh``.
+
+    The installer may create this directory and the default key, or reuse an
+    existing key selected with ``--identity-file``.  Keeping the path to one
+    normal file in ``~/.ssh`` prevents a typo from making the Native Host read
+    an unrelated private key elsewhere on disk.
+    """
+
+    root = _safe_path((home or Path.home()) / ".ssh")
+    if os.path.lexists(str(root)) and root.is_symlink():
+        raise InstallError("~/.ssh 是符号链接，无法安全安装")
+    candidate = _safe_path(value or root / "rsshub-cookie-sync")
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise InstallError("--identity-file 必须位于 ~/.ssh 目录内") from exc
+    if len(relative.parts) != 1 or relative.name in {"", ".", ".."}:
+        raise InstallError("--identity-file 必须是 ~/.ssh 下的文件名")
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+", relative.name):
+        raise InstallError("--identity-file 文件名不合法")
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if os.path.lexists(str(current)) and current.is_symlink():
+            raise InstallError("--identity-file 不能是符号链接")
+    return candidate
+
+
 def _validate_known_hosts_entry(payload: bytes, *, server_host: str, server_port: int) -> None:
     """Require an exact, unhashed entry for the configured SSH endpoint.
 
@@ -252,8 +289,14 @@ def _generate_identity(key_path: Path) -> None:
     _ensure_dir(key_path.parent, 0o700)
     _assert_not_symlink(key_path)
     if key_path.exists():
-        if not key_path.is_file():
+        try:
+            info = key_path.lstat()
+        except OSError as exc:
+            raise InstallError("SSH 密钥不可读") from exc
+        if not stat.S_ISREG(info.st_mode):
             raise InstallError("SSH 密钥路径不是普通文件")
+        if info.st_uid != os.getuid():
+            raise InstallError("SSH 密钥必须由当前用户拥有")
         os.chmod(key_path, 0o600)
         return
     old_umask = os.umask(0o077)
@@ -287,27 +330,87 @@ def _generate_identity(key_path: Path) -> None:
     os.chmod(key_path, 0o600)
 
 
+def _ensure_identity(key_path: Path, *, generate: bool) -> None:
+    """Validate/reuse an existing key, or create the default one."""
+
+    _ensure_dir(key_path.parent, 0o700)
+    if key_path.exists() or key_path.is_symlink():
+        if key_path.is_symlink():
+            raise InstallError("SSH 密钥不能是符号链接")
+        try:
+            info = key_path.lstat()
+        except OSError as exc:
+            raise InstallError("SSH 密钥不可读") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise InstallError("SSH 密钥路径不是普通文件")
+        if info.st_uid != os.getuid():
+            raise InstallError("SSH 密钥必须由当前用户拥有")
+        os.chmod(key_path, 0o600)
+        return
+    if not generate:
+        raise InstallError("未找到 SSH 密钥；请移除 --no-generate-key 或先准备 --identity-file")
+    _generate_identity(key_path)
+
+
 def _ensure_known_hosts(
     destination: Path,
     source: Optional[Path],
     *,
-    server_host: str,
+    server_host: Optional[str],
     server_port: int,
 ) -> bool:
     _ensure_dir(destination.parent, 0o700)
     if source is not None:
-        _atomic_write_bytes(
-            destination,
-            _read_known_hosts_source(source, server_host=server_host, server_port=server_port),
-            0o600,
+        if server_host is None:
+            raise InstallError("提供 known_hosts 源文件时必须同时提供服务器地址")
+        source_payload = _read_known_hosts_source(
+            source, server_host=server_host, server_port=server_port
         )
+        # The default destination is the user's normal ~/.ssh/known_hosts.
+        # Never replace that shared file just because the installer received a
+        # one-entry source file; merge the verified entry and preserve all
+        # existing host keys.
+        if destination.exists():
+            _assert_not_symlink(destination)
+            if not destination.is_file():
+                raise InstallError("known_hosts 目标不是普通文件")
+            try:
+                destination_info = destination.lstat()
+            except OSError as exc:
+                raise InstallError("known_hosts 目标不可读") from exc
+            if destination_info.st_uid != os.getuid():
+                raise InstallError("known_hosts 目标必须由当前用户拥有")
+            try:
+                existing = destination.read_bytes()
+            except OSError as exc:
+                raise InstallError("known_hosts 目标不可读") from exc
+            if b"\x00" in existing or len(existing) > 1024 * 1024:
+                raise InstallError("known_hosts 目标不合法")
+            separator = b"" if not existing or existing.endswith(b"\n") else b"\n"
+            merged = existing + separator + source_payload
+        else:
+            merged = source_payload
+        _validate_known_hosts_entry(merged, server_host=server_host, server_port=server_port)
+        _atomic_write_bytes(destination, merged, 0o600)
         return True
     if destination.exists():
         _assert_not_symlink(destination)
         if not destination.is_file():
             raise InstallError("known_hosts 目标不是普通文件")
+        try:
+            info = destination.lstat()
+        except OSError as exc:
+            raise InstallError("known_hosts 目标不可读") from exc
+        if info.st_uid != os.getuid():
+            raise InstallError("known_hosts 目标必须由当前用户拥有")
         os.chmod(destination, 0o600)
         if destination.stat().st_size == 0:
+            return False
+        if server_host is None:
+            # A fresh zero-argument install has no endpoint to verify yet.
+            # Keep the user's shared known_hosts intact and let Options set
+            # the endpoint later; the first update will still use strict host
+            # key checking.
             return False
         try:
             payload = destination.read_bytes()
@@ -332,41 +435,44 @@ def build_manifest(host_path: Path, extension_id: str) -> Mapping[str, Any]:
     }
 
 
+def _native_launcher(python_executable: Optional[Path], host_path: Path) -> bytes:
+    """Create a launcher that does not depend on Edge's GUI process PATH."""
+
+    raw_python = python_executable or Path(sys.executable)
+    try:
+        interpreter = raw_python.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise InstallError("无法确定当前 Python 解释器") from exc
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise InstallError("当前 Python 解释器不可执行")
+    command = " ".join((shlex.quote(str(interpreter)), shlex.quote(str(host_path))))
+    return f'#!/bin/sh\nexec {command} "$@"\n'.encode("utf-8")
+
+
 def build_config(
     *,
     identity_file: Path,
     known_hosts_file: Path,
-    server_host: str,
+    server_host: Optional[str] = None,
     server_port: int = DEFAULT_SERVER_PORT,
     server_user: str = DEFAULT_SERVER_USER,
-    proxy_host: Optional[str] = None,
-    proxy_port: Optional[int] = None,
     connect_timeout: int = DEFAULT_CONNECT_TIMEOUT,
     ssh_binary: str = DEFAULT_SSH_BINARY,
-    nc_binary: str = DEFAULT_NC_BINARY,
 ) -> Mapping[str, Any]:
-    if (proxy_host is None) != (proxy_port is None):
-        raise InstallError("--proxy-host 与 --proxy-port 必须同时提供")
     return {
         "schema_version": 1,
         "host_name": HOST_NAME,
         "server": {
-            "host": _validate_endpoint(server_host, label="--server-host"),
+            "host": (
+                _validate_endpoint(server_host, label="--server-host")
+                if server_host is not None
+                else None
+            ),
             "port": _validate_port(server_port, "--server-port"),
             "user": _validate_user(server_user),
         },
-        "proxy": (
-            None
-            if proxy_host is None
-            else {
-                "type": "socks5",
-                "host": _validate_endpoint(proxy_host, label="--proxy-host"),
-                "port": _validate_port(proxy_port, "--proxy-port"),
-            }
-        ),
         "ssh": {
             "binary": _validate_binary(ssh_binary, "--ssh-binary"),
-            "nc_binary": _validate_binary(nc_binary, "--nc-binary"),
             "identity_file": str(identity_file),
             "known_hosts_file": str(known_hosts_file),
             "connect_timeout": _validate_timeout(connect_timeout),
@@ -376,16 +482,15 @@ def build_config(
 
 def install(
     *,
-    extension_id: str,
+    extension_id: str = DEFAULT_EXTENSION_ID,
     app_support_dir: Path = DEFAULT_APP_SUPPORT_DIR,
     edge_manifest_dir: Path = DEFAULT_EDGE_MANIFEST_DIR,
     known_hosts_source: Optional[Path] = None,
-    server_host: str,
-    server_port: int = DEFAULT_SERVER_PORT,
-    server_user: str = DEFAULT_SERVER_USER,
-    proxy_host: Optional[str] = None,
-    proxy_port: Optional[int] = None,
-    connect_timeout: int = DEFAULT_CONNECT_TIMEOUT,
+    server_host: Optional[str] = None,
+    server_port: Optional[int] = None,
+    server_user: Optional[str] = None,
+    identity_file: Optional[Path] = None,
+    connect_timeout: Optional[int] = None,
     no_generate_key: bool = False,
     source_host: Optional[Path] = None,
     allowed_root: Optional[Path] = None,
@@ -398,17 +503,6 @@ def install(
     """
 
     extension_id = _validate_extension_id(extension_id)
-    # Validate all endpoint options before creating or replacing any local
-    # files.  This keeps a typo from leaving a half-installed host behind.
-    _validate_endpoint(server_host, label="--server-host")
-    _validate_port(server_port, "--server-port")
-    _validate_user(server_user)
-    if (proxy_host is None) != (proxy_port is None):
-        raise InstallError("--proxy-host 与 --proxy-port 必须同时提供")
-    if proxy_host is not None:
-        _validate_endpoint(proxy_host, label="--proxy-host")
-        _validate_port(proxy_port, "--proxy-port")
-    _validate_timeout(connect_timeout)
     trusted_root = _safe_path(allowed_root or Path.home())
     app_support_dir = _managed_directory(
         app_support_dir,
@@ -428,42 +522,96 @@ def install(
     # Support, which would leave Edge invoking install.py as a Native host.
     source_host = source_host or Path(__file__).with_name("native_host.py").resolve()
     host_path = app_support_dir / "native_host.py"
+    launcher_path = app_support_dir / "native_host"
     config_path = app_support_dir / "config.json"
-    ssh_dir = app_support_dir / "ssh"
-    identity_file = ssh_dir / "id_ed25519"
-    known_hosts_file = ssh_dir / "known_hosts"
     manifest_path = edge_manifest_dir / f"{HOST_NAME}.json"
 
-    _copy_file_atomic(source_host, host_path, 0o700)
-    if no_generate_key:
-        if not identity_file.is_file() or identity_file.is_symlink():
-            raise InstallError("未找到专用 SSH 密钥；请移除 --no-generate-key 或先准备密钥")
-        os.chmod(identity_file, 0o600)
+    # Reinstallation is intentionally non-destructive.  If an older version
+    # already has a valid server or an Application Support identity, retain it
+    # unless the operator explicitly supplies a replacement.  This also makes
+    # the old non-empty proxy section harmless: native_host ignores it and
+    # the next successful write below emits a direct-SSH-only config.
+    existing: Optional[HostConfig] = None
+    if os.path.lexists(str(config_path)):
+        try:
+            existing = load_config(config_path)
+        except ConfigurationError as exc:
+            raise InstallError("已有配置文件不合法；为避免清空部署，请先修复或备份它") from exc
+
+    effective_host = server_host if server_host is not None else (existing.server_host if existing else None)
+    effective_port = server_port if server_port is not None else (existing.server_port if existing else DEFAULT_SERVER_PORT)
+    effective_user = server_user if server_user is not None else (existing.server_user if existing else DEFAULT_SERVER_USER)
+    effective_timeout = connect_timeout if connect_timeout is not None else (existing.connect_timeout if existing else DEFAULT_CONNECT_TIMEOUT)
+    if effective_host is not None:
+        _validate_endpoint(effective_host, label="--server-host")
+    _validate_port(effective_port, "--server-port")
+    _validate_user(effective_user)
+    _validate_timeout(effective_timeout)
+
+    if identity_file is not None:
+        selected_identity = _identity_path(identity_file, home=trusted_root)
+    elif existing is not None:
+        existing_identity = _safe_path(existing.identity_file)
+        ssh_root = _safe_path(trusted_root / ".ssh")
+        try:
+            relative = existing_identity.relative_to(ssh_root)
+        except ValueError:
+            try:
+                existing_identity.relative_to(app_support_dir)
+            except ValueError as exc:
+                raise InstallError("已有 SSH 密钥不在 ~/.ssh 或旧版 Application Support 目录内") from exc
+            # A legacy key remains usable and is intentionally not copied or
+            # exposed to Edge; its public selector is simply ``legacy``.
+            selected_identity = existing_identity
+        else:
+            if len(relative.parts) != 1:
+                raise InstallError("已有 SSH 密钥路径不安全")
+            selected_identity = _identity_path(existing_identity, home=trusted_root)
     else:
-        _generate_identity(identity_file)
+        selected_identity = _identity_path(None, home=trusted_root)
+
+    if existing is not None and known_hosts_source is None:
+        # Keep an older Application Support known_hosts file when it is the
+        # only trust store for the existing deployment.  Fresh installs use
+        # the normal ~/.ssh/known_hosts path.
+        existing_known_hosts = _safe_path(existing.known_hosts_file)
+        standard_known_hosts = _safe_path(trusted_root / ".ssh" / "known_hosts")
+        if existing_known_hosts != standard_known_hosts:
+            try:
+                existing_known_hosts.relative_to(app_support_dir)
+            except ValueError:
+                known_hosts_file = standard_known_hosts
+            else:
+                known_hosts_file = existing_known_hosts
+        else:
+            known_hosts_file = standard_known_hosts
+    else:
+        known_hosts_file = _safe_path(trusted_root / ".ssh" / "known_hosts")
+
+    _copy_file_atomic(source_host, host_path, 0o700)
+    _atomic_write_bytes(launcher_path, _native_launcher(None, host_path), 0o700)
+    _ensure_identity(selected_identity, generate=not no_generate_key)
     known_hosts_ready = _ensure_known_hosts(
         known_hosts_file,
         known_hosts_source,
-        server_host=server_host,
-        server_port=server_port,
+        server_host=effective_host,
+        server_port=effective_port,
     )
 
     config = build_config(
-        identity_file=identity_file,
+        identity_file=selected_identity,
         known_hosts_file=known_hosts_file,
-        server_host=server_host,
-        server_port=server_port,
-        server_user=server_user,
-        proxy_host=proxy_host,
-        proxy_port=proxy_port,
-        connect_timeout=connect_timeout,
+        server_host=effective_host,
+        server_port=effective_port,
+        server_user=effective_user,
+        connect_timeout=effective_timeout,
     )
     _atomic_write_bytes(
         config_path,
         json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",
         0o600,
     )
-    manifest = build_manifest(host_path, extension_id)
+    manifest = build_manifest(launcher_path, extension_id)
     _atomic_write_bytes(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",
@@ -472,11 +620,13 @@ def install(
     return {
         "app_support_dir": app_support_dir,
         "host_path": host_path,
+        "launcher_path": launcher_path,
         "config_path": config_path,
-        "identity_file": identity_file,
+        "identity_file": selected_identity,
         "known_hosts_file": known_hosts_file,
         "manifest_path": manifest_path,
         "known_hosts_ready": known_hosts_ready,
+        "server_configured": effective_host is not None,
     }
 
 
@@ -495,7 +645,11 @@ def _public_key(identity_file: Path) -> str:
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="安装 RSSHub Cookie Sync Edge Native Messaging host")
-    parser.add_argument("--extension-id", required=True, help="固定的 32 位 Edge 扩展 ID")
+    parser.add_argument(
+        "--extension-id",
+        default=DEFAULT_EXTENSION_ID,
+        help=f"扩展 ID（默认：{DEFAULT_EXTENSION_ID}；仅在使用自定义扩展时指定）",
+    )
     parser.add_argument("--app-support-dir", type=Path, default=DEFAULT_APP_SUPPORT_DIR)
     parser.add_argument("--edge-manifest-dir", type=Path, default=DEFAULT_EDGE_MANIFEST_DIR)
     parser.add_argument(
@@ -503,19 +657,16 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         type=Path,
         help="预先获取并核对过的 SSH known_hosts 文件；不会自动 ssh-keyscan",
     )
-    parser.add_argument("--server-host", required=True)
-    parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
-    parser.add_argument("--server-user", default=DEFAULT_SERVER_USER)
+    parser.add_argument("--server-host", help="服务器地址；不填则保留已有配置，首次安装可稍后在扩展设置中填写")
+    parser.add_argument("--server-port", type=int, default=None)
+    parser.add_argument("--server-user", default=None)
     parser.add_argument(
-        "--proxy-host",
-        help="可选的本机 SOCKS5 代理主机；必须与 --proxy-port 一起提供",
+        "--identity-file",
+        type=Path,
+        default=None,
+        help="~/.ssh 下要复用或创建的私钥文件（默认：~/.ssh/rsshub-cookie-sync）",
     )
-    parser.add_argument(
-        "--proxy-port",
-        type=int,
-        help="可选的本机 SOCKS5 代理端口；必须与 --proxy-host 一起提供",
-    )
-    parser.add_argument("--connect-timeout", type=int, default=DEFAULT_CONNECT_TIMEOUT)
+    parser.add_argument("--connect-timeout", type=int, default=None)
     parser.add_argument(
         "--no-generate-key",
         action="store_true",
@@ -535,8 +686,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             server_host=args.server_host,
             server_port=args.server_port,
             server_user=args.server_user,
-            proxy_host=args.proxy_host,
-            proxy_port=args.proxy_port,
+            identity_file=args.identity_file,
             connect_timeout=args.connect_timeout,
             no_generate_key=args.no_generate_key,
         )
@@ -552,7 +702,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if public_key:
         print("请把下面的公钥加入服务器 rsshub-sync 账号（不含引号）：")
         print(public_key)
-    if not paths["known_hosts_ready"]:
+    if not paths["server_configured"]:
+        print(
+            "提示：尚未配置服务器。安装扩展后打开“设置”，填写服务器地址、端口并选择密钥。",
+            file=sys.stderr,
+        )
+    elif not paths["known_hosts_ready"]:
         print(
             f"警告：{paths['known_hosts_file']} 目前为空；请先写入已核对的服务器主机公钥，"
             "StrictHostKeyChecking=yes 才会允许连接。",

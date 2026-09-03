@@ -103,6 +103,12 @@ h2 {
   line-height: 1.45;
 }
 
+.provider .copy-cookie {
+  grid-column: 1 / -1;
+  justify-self: end;
+  min-height: 30px;
+}
+
 .badge {
   align-self: start;
   border-radius: 999px;
@@ -118,7 +124,7 @@ h2 {
 
 .actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 16px;
 }

@@ -28,11 +28,12 @@
 
       <div class="actions">
         <button id="grant" class="secondary" type="button">授权站点权限</button>
-        <button id="refresh" class="secondary" type="button">刷新状态</button>
+        <button id="refresh" class="secondary" type="button">刷新扩展状态</button>
         <button id="sync" class="primary" type="button">立即同步</button>
+        <button id="settings" class="secondary" type="button">连接设置</button>
       </div>
 
-      <p class="privacy">Cookie 只在内存中读取并通过 Native Messaging 发送，不会保存到扩展存储。</p>
+      <p class="privacy">同步时 Cookie 只在内存中传递；仅在你点击“复制 Cookie”时才会写入剪贴板。扩展不会持久化 Cookie。</p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

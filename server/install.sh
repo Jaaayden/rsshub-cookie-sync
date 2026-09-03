@@ -6,7 +6,7 @@ set -eu
 # image.  Cookie values are handled by the Python transaction, not by shell
 # variables or command-line arguments.
 
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 LC_ALL=C
 export LC_ALL
@@ -14,13 +14,18 @@ export LC_ALL
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  install.sh --compose-file ABSOLUTE_PATH [options]
+  install.sh [options]
+
+Without options the installer looks for a Compose file in the current
+directory, /opt/rsshub, and /root/rsshub.  It asks for confirmation, lets
+Compose resolve its project, and uses service rsshub plus
+http://127.0.0.1:1200 unless the deployment is non-standard.
 
 Options:
-  --compose-file ABSOLUTE_PATH   Existing Compose file to manage (required)
-  --project-name NAME            Compose project name (default: rsshub)
-  --service-name NAME            Compose service to recreate (default: rsshub)
-  --rsshub-base-url URL          Loopback RSSHub URL (default: http://127.0.0.1:1200)
+  --compose-file ABSOLUTE_PATH   Compose file (normally discovered automatically)
+  --project-name NAME            Advanced: override the detected Compose project
+  --service-name NAME            Advanced: service to recreate (default: rsshub)
+  --rsshub-base-url URL          Advanced: local RSSHub URL (default: http://127.0.0.1:1200)
   --replace-deployment           Allow replacing a different saved deployment
   --help                         Show this help
 EOF
@@ -43,9 +48,81 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 COMPOSE_FILE=
 PROJECT=rsshub
+PROJECT_EXPLICIT=0
 SERVICE=rsshub
 RSSHUB_BASE_URL=http://127.0.0.1:1200
 REPLACE_DEPLOYMENT=0
+INTERACTIVE=0
+ORIGINAL_ARGC=$#
+
+ask_yes_no() {
+    question=$1
+    default_answer=${2:-no}
+    [ -r /dev/tty ] || return 1
+    while :; do
+        if [ "$default_answer" = yes ]; then
+            printf '%s' "$question [Y/n]: " >&2
+        else
+            printf '%s' "$question [y/N]: " >&2
+        fi
+        IFS= read -r answer < /dev/tty || return 1
+        case "$answer" in
+            y|Y|yes|YES|Yes) return 0 ;;
+            n|N|no|NO|No) return 1 ;;
+            "") [ "$default_answer" = yes ] && return 0; return 1 ;;
+            *) echo "请输入 y 或 n。" >&2 ;;
+        esac
+    done
+}
+
+# The one-command installer is intentionally small: the common RSSHub
+# layouts all use the same file and service names.  Keep the unusual layout
+# escape hatch in the argument parser below, but do not make every user learn
+# Compose's internal project/service terminology.
+discover_compose_file() {
+    for candidate in \
+        "$PWD/docker-compose.yml" "$PWD/docker-compose.yaml" \
+        "$PWD/compose.yml" "$PWD/compose.yaml" \
+        /opt/rsshub/docker-compose.yml /opt/rsshub/docker-compose.yaml \
+        /opt/rsshub/compose.yml /opt/rsshub/compose.yaml \
+        /root/rsshub/docker-compose.yml /root/rsshub/docker-compose.yaml \
+        /root/rsshub/compose.yml /root/rsshub/compose.yaml; do
+        if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+            COMPOSE_FILE=$candidate
+            echo "检测到 RSSHub Compose 文件：$COMPOSE_FILE" >&2
+            if ask_yes_no "将检查并迁移这个文件，继续吗" yes; then
+                return 0
+            fi
+            COMPOSE_FILE=
+        fi
+    done
+
+    [ -r /dev/tty ] || die "未自动找到 docker-compose.yml；请使用 --compose-file 指定绝对路径"
+    printf '%s' "未找到常见位置的 docker-compose.yml，请输入绝对路径（直接回车退出）： " >&2
+    IFS= read -r COMPOSE_FILE < /dev/tty || die "无法从终端读取 Compose 路径"
+    [ -n "$COMPOSE_FILE" ] || die "没有提供 Compose 路径"
+}
+
+prompt_for_service_if_needed() {
+    services=$1
+    if printf '%s\n' "$services" | awk -v expected="$SERVICE" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
+        return 0
+    fi
+    if [ "$INTERACTIVE" -ne 1 ] || [ "$SERVICE" != rsshub ]; then
+        die "Compose 中没有找到 RSSHub 服务 '$SERVICE'；如服务名称不同，请使用 --service-name 指定"
+    fi
+
+    printf '%s\n' "Compose 中没有找到默认服务 rsshub。可输入实际的 RSSHub 服务名；常见官方文件无需修改。" >&2
+    printf '%s\n' "当前文件定义了这些服务：" >&2
+    printf '%s\n' "$services" | awk '{ print "  - " $0 }' >&2
+    printf '%s' "RSSHub 服务名（直接回车退出）： " >&2
+    IFS= read -r selected_service < /dev/tty || die "无法从终端读取服务名"
+    [ -n "$selected_service" ] || die "没有提供 RSSHub 服务名"
+    SERVICE=$selected_service
+    if ! printf '%s\n' "$services" | awk -v expected="$SERVICE" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
+        die "Compose 中没有找到服务 '$SERVICE'"
+    fi
+}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -57,6 +134,7 @@ while [ "$#" -gt 0 ]; do
         --project-name)
             [ "$#" -ge 2 ] || die "--project-name requires an argument"
             PROJECT=$2
+            PROJECT_EXPLICIT=1
             shift 2
             ;;
         --service-name)
@@ -84,10 +162,17 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$COMPOSE_FILE" ] || {
-    usage
-    die "--compose-file is required"
-}
+if [ "$ORIGINAL_ARGC" -eq 0 ]; then
+    INTERACTIVE=1
+fi
+if [ -z "$COMPOSE_FILE" ]; then
+    if [ "$INTERACTIVE" -eq 1 ]; then
+        discover_compose_file
+    else
+        usage
+        die "--compose-file is required when using options; omit all options for automatic discovery"
+    fi
+fi
 
 # Keep the shell-side checks intentionally stricter than the minimum needed by
 # Docker.  This prevents path confusion and makes the generated systemd
@@ -107,27 +192,6 @@ validate_abs_path() {
 }
 
 validate_abs_path "$COMPOSE_FILE" "--compose-file"
-
-case "$PROJECT" in
-    [a-z0-9]*|[a-z0-9]) ;;
-    *) die "--project-name must start with a lowercase letter or digit" ;;
-esac
-case "$PROJECT" in
-    *[!a-z0-9_-]*) die "--project-name contains unsupported characters" ;;
-esac
-
-case "$SERVICE" in
-    [A-Za-z0-9]*) ;;
-    *) die "--service-name must start with a letter or digit" ;;
-esac
-case "$SERVICE" in
-    *[!A-Za-z0-9_.-]*) die "--service-name contains unsupported characters" ;;
-esac
-
-case "$RSSHUB_BASE_URL" in
-    http://*) ;;
-    *) die "--rsshub-base-url must use http://" ;;
-esac
 
 INSTALL_DIR=/usr/local/lib/rsshub-cookie-sync
 SBIN_DIR=/usr/local/sbin
@@ -213,7 +277,7 @@ assert_root_chain() {
 
 assert_root_chain "$SCRIPT_DIR"
 for source_file in \
-    install.sh rsshub_cookie_sync.py rsshub-cookie-sync rsshub-cookie-sync-apply \
+    install.sh uninstall.sh rsshub_cookie_sync.py rsshub-cookie-sync rsshub-cookie-sync-apply \
     provision-ssh-key.sh sudoers.example sshd-rsshub-cookie-sync.conf \
     config.example.json rsshub-cookie-sync-monitor.service \
     rsshub-cookie-sync-monitor.timer; do
@@ -241,15 +305,93 @@ if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
     assert_root_file "$CONFIG_FILE"
 fi
 
+# A no-argument reinstall should preserve the target that was already
+# selected, including a non-default service or loopback port.  Read only the
+# four non-secret deployment fields from the root-only config, and only reuse
+# them when they refer to the same Compose file the operator just confirmed.
+# Bark credentials and Cookie material are never emitted by this parser.
+if [ "$INTERACTIVE" -eq 1 ] && [ -f "$CONFIG_FILE" ]; then
+    saved_deployment=$(/usr/bin/python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+deployment = data.get("deployment")
+rsshub = data.get("rsshub")
+if not isinstance(deployment, dict) or not isinstance(rsshub, dict):
+    raise SystemExit(2)
+values = (
+    deployment.get("compose_file"),
+    deployment.get("project"),
+    deployment.get("service"),
+    rsshub.get("base_url"),
+)
+if not all(isinstance(value, str) and value and not any(char in value for char in "|\x00\r\n") for value in values):
+    raise SystemExit(2)
+print("|".join(values))
+' "$CONFIG_FILE" 2>/dev/null || true)
+    if [ -n "$saved_deployment" ]; then
+        saved_compose_file=
+        saved_project=
+        saved_service=
+        saved_base_url=
+        IFS='|' read -r saved_compose_file saved_project saved_service saved_base_url <<EOF
+$saved_deployment
+EOF
+        if [ "$saved_compose_file" = "$COMPOSE_FILE" ]; then
+            PROJECT=$saved_project
+            PROJECT_EXPLICIT=1
+            SERVICE=$saved_service
+            RSSHUB_BASE_URL=$saved_base_url
+            echo "检测到已安装实例，将保留原有 service 和健康地址。" >&2
+        fi
+    fi
+fi
+
+case "$SERVICE" in
+    [A-Za-z0-9]*) ;;
+    *) die "--service-name must start with a letter or digit" ;;
+esac
+case "$SERVICE" in
+    *[!A-Za-z0-9_.-]*) die "--service-name contains unsupported characters" ;;
+esac
+
+case "$RSSHUB_BASE_URL" in
+    http://*) ;;
+    *) die "--rsshub-base-url must use http://" ;;
+esac
+
+# Let Compose resolve its real project name from a top-level `name:`, the
+# Compose directory, or COMPOSE_PROJECT_NAME.  Do this only after verifying
+# that the complete Compose path is root-owned and not writable by other
+# users.  The canonical JSON is consumed by a pipe and never printed because
+# it may contain rendered environment values.
+if [ "$PROJECT_EXPLICIT" -eq 0 ]; then
+    PROJECT=$(docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null | \
+        /usr/bin/python3 -c 'import json,sys; value=json.load(sys.stdin).get("name"); isinstance(value,str) and value or sys.exit(2); print(value)') \
+        || die "cannot resolve the Compose project name"
+fi
+case "$PROJECT" in
+    [a-z0-9]*|[a-z0-9]) ;;
+    *) die "Compose project name must start with a lowercase letter or digit" ;;
+esac
+case "$PROJECT" in
+    *[!a-z0-9_-]*) die "Compose project name contains unsupported characters" ;;
+esac
+
 # Validate Compose without ever emitting its rendered configuration.  The
 # service check uses the exact line returned by `config --services`, so a name
-# that merely contains the requested name is not accepted.
+# that merely contains the requested name is not accepted.  In the common
+# interactive path a non-standard service name is requested once, rather than
+# making the operator learn --service-name.
 if ! docker compose -p "$PROJECT" -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1; then
     die "existing Compose configuration is invalid"
 fi
 compose_services=$(docker compose -p "$PROJECT" -f "$COMPOSE_FILE" config --services 2>/dev/null) || die "cannot list Compose services"
-if ! printf '%s\n' "$compose_services" | awk -v expected="$SERVICE" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
-    die "configured Compose service was not found: $SERVICE"
+prompt_for_service_if_needed "$compose_services"
+if [ "$INTERACTIVE" -eq 1 ]; then
+    echo "已识别 Compose 项目：$PROJECT" >&2
+    echo "RSSHub 服务：$SERVICE" >&2
+    echo "本机健康地址：$RSSHUB_BASE_URL" >&2
 fi
 if ! visudo -cf "$SCRIPT_DIR/sudoers.example" >/dev/null 2>&1; then
     die "sudoers source failed visudo validation"
@@ -328,6 +470,7 @@ restore_installed_assets() {
     restore_managed_asset "$INSTALL_DIR/rsshub-cookie-sync" launcher
     restore_managed_asset "$SBIN_DIR/rsshub-cookie-sync-apply" apply
     restore_managed_asset "$SBIN_DIR/rsshub-cookie-sync-provision-key" provision
+    restore_managed_asset "$SBIN_DIR/rsshub-cookie-sync-uninstall" uninstall
     restore_managed_asset /etc/sudoers.d/rsshub-cookie-sync sudoers
     rmdir "$INSTALL_DIR" 2>/dev/null || true
 }
@@ -468,6 +611,35 @@ handle_signal() {
 trap rollback_install EXIT
 trap handle_signal HUP INT TERM
 
+finish_interactive_setup() {
+    [ "$INTERACTIVE" -eq 1 ] || return 0
+    [ -r /dev/tty ] || return 0
+
+    echo >&2
+    if ask_yes_no "现在配置 Bark 通知吗"; then
+        # configure-bark reads from the terminal itself and uses getpass, so
+        # the Device Key is neither an argument nor an echoed shell input.
+        if /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
+            --config "$CONFIG_FILE" configure-bark < /dev/tty >/dev/null; then
+            echo "Bark 已配置。" >&2
+        else
+            echo "Bark 配置失败；安装已完成，可稍后重新运行 configure-bark。" >&2
+        fi
+    fi
+
+    echo >&2
+    if ask_yes_no "现在安装 Edge Native Host 的 SSH 公钥吗"; then
+        echo "请粘贴一整行 ssh-ed25519 公钥后按回车（仅接受一行，公钥不是私钥）：" >&2
+        IFS= read -r public_key < /dev/tty || public_key=
+        if [ -n "$public_key" ] && printf '%s\n' "$public_key" | \
+            "$SBIN_DIR/rsshub-cookie-sync-provision-key" >/dev/null 2>&1; then
+            echo "SSH 公钥已安装。" >&2
+        else
+            echo "SSH 公钥安装失败；安装已完成，可稍后运行 rsshub-cookie-sync-provision-key。" >&2
+        fi
+    fi
+}
+
 # Freeze the existing scheduler before touching config, Compose, or its
 # secret env.  Install the rollback trap first so even a partial systemctl
 # failure restores the timer's previous enablement and active state.  Stopping
@@ -499,6 +671,7 @@ backup_managed_asset "$INSTALL_DIR/rsshub_cookie_sync.py" python
 backup_managed_asset "$INSTALL_DIR/rsshub-cookie-sync" launcher
 backup_managed_asset "$SBIN_DIR/rsshub-cookie-sync-apply" apply
 backup_managed_asset "$SBIN_DIR/rsshub-cookie-sync-provision-key" provision
+backup_managed_asset "$SBIN_DIR/rsshub-cookie-sync-uninstall" uninstall
 backup_managed_asset /etc/sudoers.d/rsshub-cookie-sync sudoers
 install -d -m 0755 "$INSTALL_DIR" "$SBIN_DIR"
 install -d -m 0700 "$CONFIG_DIR" "$STATE_DIR"
@@ -507,6 +680,7 @@ install -m 0755 "$SCRIPT_DIR/rsshub_cookie_sync.py" "$INSTALL_DIR/rsshub_cookie_
 install -m 0755 "$SCRIPT_DIR/rsshub-cookie-sync" "$INSTALL_DIR/rsshub-cookie-sync"
 install -m 0755 "$SCRIPT_DIR/rsshub-cookie-sync-apply" "$SBIN_DIR/rsshub-cookie-sync-apply"
 install -m 0755 "$SCRIPT_DIR/provision-ssh-key.sh" "$SBIN_DIR/rsshub-cookie-sync-provision-key"
+install -m 0755 "$SCRIPT_DIR/uninstall.sh" "$SBIN_DIR/rsshub-cookie-sync-uninstall"
 
 # Preserve the existing configuration while configure-deployment merges the
 # target fields.  The backup is removed on both success and rollback.
@@ -682,4 +856,9 @@ fi
 if [ -n "$asset_backup_dir" ]; then
     rm -rf "$asset_backup_dir"
 fi
-echo "RSSHub Cookie sync server installed. Add a public key with rsshub-cookie-sync-provision-key, configure Bark through stdin, then run notify-test."
+finish_interactive_setup
+if [ "$INTERACTIVE" -eq 1 ]; then
+    echo "RSSHub Cookie sync 服务端安装完成。" >&2
+else
+    echo "RSSHub Cookie sync server installed. Add a public key with rsshub-cookie-sync-provision-key, configure Bark through stdin, then run notify-test."
+fi

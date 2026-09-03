@@ -16,6 +16,7 @@ import rsshub_cookie_sync  # noqa: E402
 
 from rsshub_cookie_sync import (  # noqa: E402
     BarkNotifier,
+    CommandRunner,
     DockerCompose,
     HTTPResponse,
     InvalidInput,
@@ -25,6 +26,7 @@ from rsshub_cookie_sync import (  # noqa: E402
     SyncError,
     SyncService,
     atomic_write,
+    build_manual_update_request,
     build_parser,
     configure_bark_from_stdin,
     configure_deployment,
@@ -411,6 +413,24 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(commands[1][-1], "reader")
         self.assertIn("my-rsshub", commands[0])
 
+    def test_command_runner_uses_a_fixed_minimal_environment(self):
+        completed = type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": "ok\n", "stderr": ""},
+        )()
+        with patch("rsshub_cookie_sync.subprocess.run", return_value=completed) as run:
+            result = CommandRunner().run(["docker", "compose", "version"], 5, capture=True)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            run.call_args.kwargs["env"],
+            {
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LC_ALL": "C",
+            },
+        )
+
     def test_migration_targets_non_default_service_and_env_reference(self):
         compose = self.root / "deploy" / "compose.yaml"
         live = self.root / "deploy" / "secrets" / "rsshub.env"
@@ -564,6 +584,42 @@ class ServerTests(unittest.TestCase):
             "providers": {"zhihu": {"cookieHeader": "empty=; z_c0=new"}},
         })["status"], "candidate_saved")
 
+    def test_manual_update_builds_the_same_bounded_single_provider_request(self):
+        self.assertEqual(
+            build_manual_update_request("zhihu", ZH_NEW),
+            {
+                "version": 1,
+                "providers": {"zhihu": {"cookieHeader": ZH_NEW}},
+            },
+        )
+        args = build_parser().parse_args(["manual-update", "--provider", "weibo"])
+        self.assertEqual(args.provider, "weibo")
+        with self.assertRaises(InvalidInput):
+            build_manual_update_request("unknown", ZH_NEW)
+        with self.assertRaises(InvalidInput):
+            build_manual_update_request("zhihu", "bad\nvalue")
+
+    def test_manual_update_cli_uses_hidden_prompt_and_never_prints_cookie(self):
+        output = io.StringIO()
+        with (
+            patch.object(rsshub_cookie_sync.sys.stdin, "isatty", return_value=True),
+            patch.object(rsshub_cookie_sync.getpass, "getpass", return_value=ZH_NEW) as hidden_prompt,
+            patch.object(rsshub_cookie_sync, "make_config", return_value=self.config),
+            patch.object(rsshub_cookie_sync, "SyncService", return_value=self.service),
+            patch.object(rsshub_cookie_sync.sys, "stdout", output),
+        ):
+            exit_code = rsshub_cookie_sync.main(
+                ["manual-update", "--provider", "zhihu", "--config", str(self.config.config_file)]
+            )
+
+        self.assertEqual(exit_code, 0)
+        hidden_prompt.assert_called_once()
+        self.assertNotIn(ZH_NEW, output.getvalue())
+        self.assertIn(
+            json.loads(output.getvalue())["status"],
+            {"unchanged", "candidate_saved", "promoted"},
+        )
+
     def test_partial_update_saves_only_valid_candidate(self):
         # Keep the existing live cookie healthy so this test exercises the
         # candidate-only path rather than the immediate-repair path.
@@ -578,6 +634,28 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((self.config.candidate_dir / "zhihu.cookie").read_text(), ZH_NEW)
         self.assertFalse((self.config.candidate_dir / "weibo.cookie").exists())
         self.assertEqual(self.live.read_text().splitlines()[0], "ZHIHU_COOKIES=" + ZH_OLD)
+
+    def test_rejected_upload_does_not_disable_an_existing_valid_candidate(self):
+        candidate_path = self.config.candidate_dir / "zhihu.cookie"
+        self.service._save_candidate("zhihu", ZH_NEW)
+        state = load_state(self.config.state_file)
+        item = state["providers"]["zhihu"]
+        item["candidate_hash"] = sha256_prefix(ZH_NEW)
+        item["candidate_validation"] = "ok"
+        save_state(self.config.state_file, state)
+
+        malformed = self.apply_payload({"zhihu": {"cookieHeader": "not-a-cookie"}})
+        rejected = self.apply_payload(
+            {"zhihu": {"cookieHeader": "z_c0=expired; foo=bar"}}
+        )
+
+        self.assertEqual(malformed["status"], "rejected_invalid")
+        self.assertEqual(rejected["status"], "rejected_invalid")
+        self.assertEqual(candidate_path.read_text(encoding="utf-8"), ZH_NEW)
+        self.assertEqual(
+            load_state(self.config.state_file)["providers"]["zhihu"]["candidate_validation"],
+            "ok",
+        )
 
     def test_monitor_promotes_after_two_auth_failures(self):
         self.service._save_candidate("zhihu", ZH_NEW)
@@ -594,6 +672,38 @@ class ServerTests(unittest.TestCase):
         self.assertFalse((self.config.candidate_dir / "zhihu.cookie").exists())
         self.assertIn(("recreate",), self.docker.calls)
         self.assertTrue(any("自动更新" in title for title, _ in self.notifier.events))
+
+    def test_candidate_transient_probe_is_retried_and_later_promoted(self):
+        self.service._save_candidate("zhihu", ZH_NEW)
+        state = load_state(self.config.state_file)
+        item = state["providers"]["zhihu"]
+        item["candidate_hash"] = sha256_prefix(ZH_NEW)
+        item["candidate_validation"] = "ok"
+        item["auth_failures"] = 1
+        item["last_probe"] = "auth_failed"
+        save_state(self.config.state_file, state)
+        self.service.prober = ScriptedProber(
+            [
+                ProbeResult("auth_failed", 401, "http_401"),
+                ProbeResult("transient", 429, "http_429"),
+                ProbeResult("ok", 200, "ok"),
+                ProbeResult("auth_failed", 401, "http_401"),
+                ProbeResult("ok", 200, "ok"),
+                ProbeResult("ok", 200, "ok"),
+                ProbeResult("ok", 200, "ok"),
+            ]
+        )
+
+        self.service.monitor()
+        self.assertIn("ZHIHU_COOKIES=" + ZH_OLD, self.live.read_text(encoding="utf-8"))
+        self.assertEqual(
+            load_state(self.config.state_file)["providers"]["zhihu"]["candidate_validation"],
+            "ok",
+        )
+
+        self.service.monitor()
+        self.assertIn("ZHIHU_COOKIES=" + ZH_NEW, self.live.read_text(encoding="utf-8"))
+        self.assertFalse((self.config.candidate_dir / "zhihu.cookie").exists())
 
     def test_apply_repairs_invalid_live_cookie_immediately(self):
         result = self.apply_payload({"zhihu": {"cookieHeader": ZH_NEW}})
@@ -789,6 +899,18 @@ class ServerTests(unittest.TestCase):
         zhihu_result = ProviderProber(self.config, zhihu_transport).probe("zhihu", ZH_OLD, full=True)
         self.assertEqual(zhihu_result, ProbeResult("auth_failed", 200, "moments_unauthorized"))
 
+    def test_weibo_probe_rejects_boolean_ok_and_non_scalar_uids(self):
+        payloads = (
+            b'{"ok":true,"data":{"login":true,"uid":"123"}}',
+            b'{"ok":1,"data":{"login":true,"uid":true}}',
+            b'{"ok":1,"data":{"login":true,"uid":["123"]}}',
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                transport = QueueTransport([HTTPResponse(200, payload)])
+                result = ProviderProber(self.config, transport).probe("weibo", WB_OLD)
+                self.assertEqual(result.kind, "auth_failed")
+
     def test_bark_posts_device_key_in_json_body_to_fixed_endpoint(self):
         transport = QueueTransport([HTTPResponse(200, b'{"code":200}')])
         config = RuntimeConfig(
@@ -852,6 +974,63 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(repeated["already_migrated"])
         self.assertFalse(repeated["migration_pending"])
         self.assertFalse(repeated["compose_changed"])
+
+    def test_migration_extracts_quoted_list_and_mapping_secret_entries(self):
+        self.compose.write_text(
+            "services:\n"
+            "  rsshub:\n"
+            "    image: diygod/rsshub:latest\n"
+            "    environment:\n"
+            f"      - \"ZHIHU_COOKIES={ZH_NEW}\"\n"
+            f"      - 'WEIBO_COOKIES={WB_NEW}'\n"
+            "      - \"TWITTER_AUTH_TOKEN=token-new\"\n",
+            encoding="utf-8",
+        )
+
+        result = migrate_compose_file(self.compose, self.live)
+
+        self.assertEqual(
+            result["migrated"],
+            ["TWITTER_AUTH_TOKEN", "WEIBO_COOKIES", "ZHIHU_COOKIES"],
+        )
+        migrated = self.compose.read_text(encoding="utf-8")
+        self.assertNotIn(ZH_NEW, migrated)
+        self.assertNotIn(WB_NEW, migrated)
+        live = self.live.read_text(encoding="utf-8")
+        self.assertIn(f"ZHIHU_COOKIES={ZH_NEW}\n", live)
+        self.assertIn(f"WEIBO_COOKIES={WB_NEW}\n", live)
+
+        # Quoted mapping keys are a separate legal YAML representation.
+        finalize_migration(self.compose, self.live)
+        self.compose.write_text(
+            "services:\n"
+            "  rsshub:\n"
+            "    image: diygod/rsshub:latest\n"
+            "    environment:\n"
+            f"      \"ZHIHU_COOKIES\": \"{ZH_NEW}\"\n"
+            f"      'WEIBO_COOKIES': '{WB_NEW}'\n",
+            encoding="utf-8",
+        )
+        result = migrate_compose_file(self.compose, self.live)
+        self.assertEqual(result["migrated"], ["WEIBO_COOKIES", "ZHIHU_COOKIES"])
+        self.assertNotIn(ZH_NEW, self.compose.read_text(encoding="utf-8"))
+
+    def test_migration_rejects_unparsed_secret_list_entry_without_changes(self):
+        original = (
+            "services:\n"
+            "  rsshub:\n"
+            "    image: diygod/rsshub:latest\n"
+            "    environment:\n"
+            "      - \"ZHIHU_COOKIES\"\n"
+        )
+        self.compose.write_text(original, encoding="utf-8")
+        old_live = self.live.read_bytes()
+
+        with self.assertRaises(SyncError):
+            migrate_compose_file(self.compose, self.live)
+
+        self.assertEqual(self.compose.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.live.read_bytes(), old_live)
 
     def test_migration_accepts_fresh_compose_without_provider_cookies(self):
         self.live.unlink()

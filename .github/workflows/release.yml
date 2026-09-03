@@ -39,6 +39,13 @@ jobs:
       - name: Test the tagged source
         run: make check
 
+      - name: Match tag to extension version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          manifest_version=$(python3 -c 'import json; print(json.load(open("extension/manifest.json", encoding="utf-8"))["version"])')
+          test "v${manifest_version}" = "$GITHUB_REF_NAME"
+
       - name: Package extension
         run: ./scripts/package-extension.sh dist/rsshub-cookie-sync-extension.zip
 
@@ -72,12 +79,21 @@ jobs:
       - name: Rebuild extension archive from the tagged source
         run: ./scripts/package-extension.sh dist/rsshub-cookie-sync-extension.zip
 
-      - name: Attach archive to an immutable tagged GitHub Release
+      - name: Prepare the stable server bootstrap
+        run: cp scripts/install-server.sh dist/install-server.sh
+
+      - name: Attach archive to the tagged GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/rsshub-cookie-sync-extension.zip
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/rsshub-cookie-sync-extension.zip \
+              dist/install-server.sh \
+              --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/rsshub-cookie-sync-extension.zip --generate-notes
+            gh release create "$GITHUB_REF_NAME" \
+              dist/rsshub-cookie-sync-extension.zip \
+              dist/install-server.sh \
+              --generate-notes
           fi

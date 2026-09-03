@@ -4,7 +4,9 @@
 The host deliberately has a very small surface area:
 
 * Native Messaging uses the Chromium little-endian, four-byte length frame.
-* The only data accepted from the extension is a versioned provider payload.
+* Synchronisation accepts only the versioned provider payload; the separate
+  get-config/set-config control messages are handled locally and never reach
+  the server.
 * The cookie headers are passed to the server only as SSH stdin.  They are
   never put in an argv item, an environment variable, or a log message.
 * The remote forced command returns one of the small, allow-listed statuses.
@@ -23,6 +25,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterable, Mapping, Optional, Sequence, TextIO, Tuple
@@ -33,6 +36,7 @@ DEFAULT_SERVER_PORT = 22
 DEFAULT_SERVER_USER = "rsshub-sync"
 DEFAULT_CONNECT_TIMEOUT = 15
 MAX_CONNECT_TIMEOUT = 120
+DEFAULT_EXTENSION_ID = "ohpnejcdmchhchkamammonikfbmfpiam"
 
 # ``ConnectTimeout`` only covers establishing the SSH connection.  The
 # forced command on the server can validate candidates, probe the current
@@ -49,8 +53,13 @@ DEFAULT_APP_SUPPORT_DIR = (
     Path.home() / "Library" / "Application Support" / "RSSHub Cookie Sync"
 )
 DEFAULT_CONFIG_PATH = DEFAULT_APP_SUPPORT_DIR / "config.json"
-DEFAULT_IDENTITY_FILE = DEFAULT_APP_SUPPORT_DIR / "ssh" / "id_ed25519"
-DEFAULT_KNOWN_HOSTS_FILE = DEFAULT_APP_SUPPORT_DIR / "ssh" / "known_hosts"
+# Keep the SSH material in the user's normal SSH directory.  The private key
+# is never read by the extension; this path is only handed to OpenSSH by the
+# Native Messaging host.  Operators may point the installer at another file
+# directly below ``~/.ssh`` when reusing an existing key.
+DEFAULT_SSH_DIR = Path.home() / ".ssh"
+DEFAULT_IDENTITY_FILE = DEFAULT_SSH_DIR / "rsshub-cookie-sync"
+DEFAULT_KNOWN_HOSTS_FILE = DEFAULT_SSH_DIR / "known_hosts"
 
 # The browser can legitimately send a fairly large Cookie header, but an
 # unbounded Native Messaging frame would make the host an easy memory DoS.
@@ -59,15 +68,24 @@ DEFAULT_KNOWN_HOSTS_FILE = DEFAULT_APP_SUPPORT_DIR / "ssh" / "known_hosts"
 # than one header but still small enough for a browser-launched helper.
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_COOKIE_BYTES = 128 * 1024
+MAX_IDENTITIES = 256
 
 ALLOWED_PROVIDERS = frozenset(("zhihu", "weibo"))
 ALLOWED_REMOTE_STATUSES = frozenset(
     ("unchanged", "candidate_saved", "promoted", "rejected_invalid", "retryable_error")
 )
+ALLOWED_CONTROL_STATUSES = frozenset(
+    ("config", "config_saved", "config_error", "rejected_invalid")
+)
+# A control-protocol sentinel, not a real filename.  Reserve and exclude it
+# from ~/.ssh scanning so a user file called "legacy" can never be confused
+# with the private key kept by a v1.0 installation.
+LEGACY_IDENTITY_NAME = "__rsshub_cookie_sync_legacy__"
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 _USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_IDENTITY_NAME_RE = re.compile(r"^[A-Za-z0-9._+\-]+$")
 _EXTENSION_ORIGIN_RE = re.compile(r"^chrome-extension://[a-p]{32}/$")
 
 
@@ -83,19 +101,29 @@ class ConfigurationError(ValueError):
 class HostConfig:
     """Validated values needed to make one SSH connection."""
 
-    # The deployment-specific server endpoint is intentionally required.  A
-    # missing value must never silently target another operator's server.
-    server_host: str
+    # The deployment-specific server endpoint is intentionally optional.  A
+    # fresh zero-argument install leaves it unset until the Edge Options page
+    # supplies the operator's own endpoint; a missing value must never
+    # silently target another operator's server.
+    server_host: Optional[str] = None
     server_port: int = DEFAULT_SERVER_PORT
     server_user: str = DEFAULT_SERVER_USER
-    # A proxy is opt-in.  ``None`` means that OpenSSH connects directly.
-    proxy_host: Optional[str] = None
-    proxy_port: Optional[int] = None
     identity_file: Path = DEFAULT_IDENTITY_FILE
     known_hosts_file: Path = DEFAULT_KNOWN_HOSTS_FILE
     ssh_binary: str = "/usr/bin/ssh"
-    nc_binary: str = "/usr/bin/nc"
     connect_timeout: int = DEFAULT_CONNECT_TIMEOUT
+
+
+def _runtime_default_config_path(
+    module_file: Optional[Path] = None,
+    fallback: Optional[Path] = None,
+) -> Path:
+    """Use the config installed beside the host, including custom locations."""
+
+    sibling = Path(module_file or __file__).resolve().with_name("config.json")
+    if os.path.lexists(str(sibling)):
+        return sibling
+    return fallback or DEFAULT_CONFIG_PATH
 
 
 def _default_path(path: Path) -> Path:
@@ -125,9 +153,8 @@ def _config_path(value: Any, base_dir: Path) -> Path:
 
 
 def _validate_endpoint(host: str, user: Optional[str] = None) -> None:
-    # The endpoint is eventually placed in an SSH argv item and a ProxyCommand
-    # option.  Keep it to a hostname/IP grammar; no shell metacharacters or
-    # whitespace can enter the command.
+    # The endpoint is placed in an SSH argv item.  Keep it to a hostname/IP
+    # grammar; no shell metacharacters or whitespace can enter the command.
     if not isinstance(host, str) or not _HOST_RE.fullmatch(host) or host.startswith(".") or host.endswith("."):
         raise ConfigurationError("invalid endpoint")
     if user is not None and (not isinstance(user, str) or not _USER_RE.fullmatch(user)):
@@ -145,9 +172,6 @@ def _validate_binary(path: str) -> str:
         or any(char.isspace() for char in path)
     ):
         raise ConfigurationError("invalid executable path")
-    # The nc path is interpolated into OpenSSH's ProxyCommand string, which
-    # OpenSSH executes through a shell.  Restrict both executable paths to a
-    # shell-safe absolute path; the default on macOS is /usr/bin/nc.
     if not re.fullmatch(r"/[A-Za-z0-9._/+-]+", path):
         raise ConfigurationError("invalid executable path")
     return path
@@ -164,10 +188,10 @@ def _quote_ssh_config_value(value: str) -> str:
     """Quote one value consumed by OpenSSH's ``-o`` config parser.
 
     ``subprocess`` already keeps each argv item intact, but OpenSSH parses the
-    text after ``-o`` again using ssh_config token rules.  Paths below
-    ``~/Library/Application Support`` therefore need config-level quoting even
-    though no shell is involved.  Escape the two characters that are special
-    inside a double-quoted ssh_config token.
+    text after ``-o`` again using ssh_config token rules.  Paths containing
+    spaces therefore need config-level quoting even though no shell is
+    involved.  Escape the two characters that are special inside a
+    double-quoted ssh_config token.
     """
 
     if not isinstance(value, str) or not value or any(
@@ -185,53 +209,42 @@ def config_from_mapping(raw: Mapping[str, Any], *, config_path: Optional[Path] =
     """
 
     base_dir = (config_path.parent if config_path else DEFAULT_APP_SUPPORT_DIR).absolute()
-    server = raw.get("server")
-    proxy = raw.get("proxy")
+    server = raw.get("server", {})
     ssh = raw.get("ssh", {})
+    if server is None:
+        server = {}
     if not isinstance(server, dict) or not isinstance(ssh, dict):
         raise ConfigurationError("invalid configuration")
 
-    server_host = _string(server.get("host"), "server host")
+    # v1.0 wrote a ``proxy`` section.  It is deliberately ignored on read so
+    # an upgrade remains usable; every configuration written by this module
+    # omits it and therefore permanently migrates the installation to direct
+    # SSH.  No proxy-related value is ever passed to OpenSSH.
+
+    raw_host = server.get("host")
+    if raw_host is None or raw_host == "":
+        server_host: Optional[str] = None
+    else:
+        server_host = _string(raw_host, "server host")
     server_user = _string(server.get("user", DEFAULT_SERVER_USER), "server user")
     server_port = _port(server.get("port", DEFAULT_SERVER_PORT))
-
-    proxy_host: Optional[str]
-    proxy_port: Optional[int]
-    if proxy is None:
-        proxy_host = None
-        proxy_port = None
-    elif isinstance(proxy, dict):
-        # A configured proxy must contain both endpoint parts.  This avoids
-        # accidentally treating a typo as a direct connection.
-        proxy_host = _string(proxy.get("host"), "proxy host")
-        proxy_port = _port(proxy.get("port"))
-        proxy_type = proxy.get("type", "socks5")
-        if proxy_type != "socks5":
-            raise ConfigurationError("only SOCKS5 proxy is supported")
-    else:
-        raise ConfigurationError("invalid configuration")
 
     identity = ssh.get("identity_file", str(DEFAULT_IDENTITY_FILE))
     known_hosts = ssh.get("known_hosts_file", str(DEFAULT_KNOWN_HOSTS_FILE))
     ssh_binary = _validate_binary(_string(ssh.get("binary", "/usr/bin/ssh"), "ssh binary"))
-    nc_binary = _validate_binary(_string(ssh.get("nc_binary", "/usr/bin/nc"), "nc binary"))
     timeout = ssh.get("connect_timeout", DEFAULT_CONNECT_TIMEOUT)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= MAX_CONNECT_TIMEOUT:
         raise ConfigurationError("invalid SSH timeout")
 
-    _validate_endpoint(server_host, server_user)
-    if proxy_host is not None:
-        _validate_endpoint(proxy_host)
+    if server_host is not None:
+        _validate_endpoint(server_host, server_user)
     return HostConfig(
         server_host=server_host,
         server_port=server_port,
         server_user=server_user,
-        proxy_host=proxy_host,
-        proxy_port=proxy_port,
         identity_file=_config_path(identity, base_dir),
         known_hosts_file=_config_path(known_hosts, base_dir),
         ssh_binary=ssh_binary,
-        nc_binary=nc_binary,
         connect_timeout=timeout,
     )
 
@@ -249,13 +262,8 @@ def _safe_config_file(path: Path) -> None:
         raise ConfigurationError("configuration file permissions are unsafe")
 
 
-def load_config(path: Path = DEFAULT_CONFIG_PATH) -> HostConfig:
-    """Load and validate an installer-generated config file.
-
-    A missing file is treated as an incomplete installation.  The host loop
-    turns that configuration error into ``retryable_error`` until the
-    installer has written a server endpoint, key, and known_hosts file.
-    """
+def _read_config_mapping(path: Path) -> Dict[str, Any]:
+    """Read one trusted config file without exposing its contents."""
 
     path = _default_path(path)
     try:
@@ -276,6 +284,19 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> HostConfig:
         raise ConfigurationError("invalid configuration")
     if type(raw.get("schema_version", 1)) is not int or raw.get("schema_version", 1) != 1:
         raise ConfigurationError("unsupported configuration version")
+    return raw
+
+
+def load_config(path: Path = DEFAULT_CONFIG_PATH) -> HostConfig:
+    """Load and validate an installer-generated config file.
+
+    A missing file is treated as an incomplete installation.  The host loop
+    turns that configuration error into ``retryable_error`` until the
+    installer has written a server endpoint, key, and known_hosts file.
+    """
+
+    path = _default_path(path)
+    raw = _read_config_mapping(path)
     return config_from_mapping(raw, config_path=path)
 
 
@@ -310,7 +331,7 @@ def validate_runtime_files(config: HostConfig) -> None:
     _safe_known_hosts_file(config.known_hosts_file)
 
 
-def build_ssh_argv(config: HostConfig, *, use_proxy: bool = True) -> Tuple[str, ...]:
+def build_ssh_argv(config: HostConfig) -> Tuple[str, ...]:
     """Return a fully explicit, shell-free SSH command.
 
     The server account is expected to use an ``authorized_keys`` forced
@@ -319,20 +340,14 @@ def build_ssh_argv(config: HostConfig, *, use_proxy: bool = True) -> Tuple[str, 
     """
 
     _port(config.server_port)
+    if config.server_host is None:
+        raise ConfigurationError("server endpoint is not configured")
     _validate_endpoint(config.server_host, config.server_user)
-    if (config.proxy_host is None) != (config.proxy_port is None):
-        raise ConfigurationError("proxy host and port must be configured together")
-    proxy_configured = config.proxy_host is not None
-    if proxy_configured:
-        # The paired-None check above makes this safe for the Optional fields.
-        _port(config.proxy_port)
-        _validate_endpoint(config.proxy_host)
     if not isinstance(config.connect_timeout, int) or isinstance(config.connect_timeout, bool):
         raise ConfigurationError("invalid SSH timeout")
     if not 1 <= config.connect_timeout <= MAX_CONNECT_TIMEOUT:
         raise ConfigurationError("invalid SSH timeout")
     _validate_binary(config.ssh_binary)
-    _validate_binary(config.nc_binary)
     _validate_file_argument(config.identity_file)
     _validate_file_argument(config.known_hosts_file)
 
@@ -386,11 +401,6 @@ def build_ssh_argv(config: HostConfig, *, use_proxy: bool = True) -> Tuple[str, 
         "-o",
         "ServerAliveCountMax=2",
     ]
-    if use_proxy and proxy_configured:
-        proxy_command = (
-            f"{config.nc_binary} -x {config.proxy_host}:{config.proxy_port} -X 5 %h %p"
-        )
-        arguments.extend(("-o", f"ProxyCommand={proxy_command}"))
     arguments.append(f"{config.server_user}@{config.server_host}")
     return tuple(arguments)
 
@@ -617,6 +627,441 @@ def process_request(raw: bytes, config: HostConfig, *, runner: Any = subprocess.
     return send_to_server(providers, config, runner=runner)
 
 
+def _parse_json_object(raw: bytes) -> Dict[str, Any]:
+    """Decode one control message with duplicate-key protection."""
+
+    try:
+        message = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ProtocolError, RecursionError) as exc:
+        raise ProtocolError("invalid control JSON") from exc
+    if not isinstance(message, dict):
+        raise ProtocolError("control request must be an object")
+    return message
+
+
+def _validate_identity_name(value: Any) -> str:
+    """Validate the public identity selector, never a filesystem path."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or value in {".", ".."}
+        or not _IDENTITY_NAME_RE.fullmatch(value)
+    ):
+        raise ProtocolError("invalid identity name")
+    return value
+
+
+def validate_control_request(raw: bytes) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Validate the small, local-only get/set configuration protocol.
+
+    Synchronisation payloads are intentionally handled by :func:`validate_request`
+    and are not accepted here.  Keeping the two exact shapes separate prevents
+    a future control field from accidentally crossing the server wire.
+    """
+
+    message = _parse_json_object(raw)
+    version = message.get("version")
+    if type(version) is not int or version != 1:
+        raise ProtocolError("unsupported control version")
+    action = message.get("action")
+    if action == "get-config":
+        if set(message) != {"version", "action"}:
+            raise ProtocolError("invalid get-config request")
+        return action, None
+    if action != "set-config":
+        raise ProtocolError("unknown control action")
+    if set(message) != {"version", "action", "server", "identityName"}:
+        raise ProtocolError("invalid set-config request")
+    server = message.get("server")
+    if not isinstance(server, dict) or set(server) != {"host", "port", "user"}:
+        raise ProtocolError("invalid server configuration")
+    host = server.get("host")
+    user = server.get("user")
+    port = server.get("port")
+    if not isinstance(host, str) or not host:
+        raise ProtocolError("invalid server host")
+    if not isinstance(user, str) or not user:
+        raise ProtocolError("invalid server user")
+    # The server installer grants this one account a forced command.  Letting
+    # a browser message select root or an ordinary shell account would bypass
+    # that server-side capability boundary.
+    if user != DEFAULT_SERVER_USER:
+        raise ProtocolError("invalid server user")
+    try:
+        _validate_endpoint(host, user)
+        _port(port)
+    except (ConfigurationError, TypeError) as exc:
+        raise ProtocolError("invalid server configuration") from exc
+    identity_name = _validate_identity_name(message.get("identityName"))
+    return action, {"host": host, "port": port, "user": user, "identityName": identity_name}
+
+
+def _is_direct_ssh_identity(path: Path) -> Optional[str]:
+    """Return a safe one-level name when ``path`` is directly under ~/.ssh."""
+
+    try:
+        relative = _default_path(path).relative_to(_default_path(DEFAULT_SSH_DIR))
+    except ValueError:
+        return None
+    if len(relative.parts) != 1:
+        return None
+    name = relative.name
+    if name in {"", ".", ".."} or not _IDENTITY_NAME_RE.fullmatch(name):
+        return None
+    return name
+
+
+def _legacy_identity_path(config: HostConfig) -> Optional[Path]:
+    """Return the current non-~/.ssh identity when it is safe to use."""
+
+    path = _default_path(config.identity_file)
+    if _is_direct_ssh_identity(path) is not None:
+        return None
+    try:
+        _safe_key_file(path)
+    except ConfigurationError:
+        return None
+    return path
+
+
+def _identity_looks_private(path: Path) -> bool:
+    """Recognise private-key files without emitting or retaining key data."""
+
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(512)
+    except (OSError, UnicodeError):
+        return False
+    if b"PRIVATE KEY" in prefix:
+        return True
+    # ssh-keygen-created keys normally have a .pub sidecar.  Accepting a
+    # verified, safe sidecar also covers platform-specific private-key
+    # formats whose first bytes do not contain a PEM marker.
+    public_path = path.with_name(f"{path.name}.pub")
+    try:
+        info = public_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return False
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return False
+        return bool(public_path.stat().st_size)
+    except (OSError, ValueError):
+        return False
+
+
+def scan_ssh_identities() -> Tuple[Mapping[str, Any], ...]:
+    """List safe private keys directly below ~/.ssh for the Options page.
+
+    Only a filename and a legacy marker leave this function.  It never returns
+    a path, fingerprint, key material, or an exception string.
+    """
+
+    root = _default_path(DEFAULT_SSH_DIR)
+    try:
+        info = root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return ()
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return ()
+        entries = sorted(root.iterdir(), key=lambda item: item.name)
+    except (OSError, ValueError):
+        return ()
+
+    identities = []
+    ignored = {
+        "config",
+        "known_hosts",
+        "known_hosts.old",
+        "authorized_keys",
+        LEGACY_IDENTITY_NAME,
+    }
+    for path in entries:
+        name = path.name
+        if name in ignored or name.endswith(".pub") or not _IDENTITY_NAME_RE.fullmatch(name):
+            continue
+        try:
+            _safe_key_file(path)
+        except ConfigurationError:
+            continue
+        if _identity_looks_private(path):
+            identities.append({"name": name, "legacy": False})
+    return tuple(identities[:MAX_IDENTITIES])
+
+
+def _identity_name_for_config(config: HostConfig) -> Optional[str]:
+    direct = _is_direct_ssh_identity(config.identity_file)
+    if direct is not None:
+        try:
+            _safe_key_file(_default_path(config.identity_file))
+        except ConfigurationError:
+            return None
+        return direct
+    if _legacy_identity_path(config) is not None:
+        return LEGACY_IDENTITY_NAME
+    return None
+
+
+def _public_config(config: HostConfig) -> Mapping[str, Any]:
+    """Build the only configuration shape exposed to Edge."""
+
+    identity_name = _identity_name_for_config(config)
+    identities = list(scan_ssh_identities())
+    if identity_name == LEGACY_IDENTITY_NAME:
+        identities.append({"name": LEGACY_IDENTITY_NAME, "legacy": True})
+    elif identity_name and not any(item["name"] == identity_name for item in identities):
+        # A valid current key can be in a format that the directory scanner
+        # cannot classify.  Show only its one-level name, never its path.
+        identities.insert(0, {"name": identity_name, "legacy": False})
+    elif identity_name is None and identities:
+        # If the configured key was removed, keep the Options page usable so
+        # the operator can select another safe key and repair the config.  This
+        # is only a suggested form selection; nothing is persisted until the
+        # user explicitly presses Save.
+        preferred = next(
+            (item for item in identities if item["name"] == "rsshub-cookie-sync"),
+            identities[0],
+        )
+        identity_name = preferred["name"]
+    identities.sort(key=lambda item: (item["name"] != "rsshub-cookie-sync", item["name"]))
+    if len(identities) > MAX_IDENTITIES:
+        # The selected identity is always retained, including the legacy
+        # marker, even on a machine with an unusually large ~/.ssh directory.
+        selected = next((item for item in identities if item["name"] == identity_name), None)
+        identities = [item for item in identities if item["name"] != identity_name]
+        identities = identities[: max(0, MAX_IDENTITIES - 1)]
+        if selected is not None:
+            identities.append(selected)
+        identities.sort(key=lambda item: (item["name"] != "rsshub-cookie-sync", item["name"]))
+    return {
+        "server": {
+            "host": config.server_host,
+            "port": config.server_port,
+            "user": config.server_user,
+        },
+        "identityName": identity_name,
+        "identities": identities,
+    }
+
+
+def _safe_config_parent(path: Path) -> Path:
+    parent = _default_path(path).parent
+    try:
+        info = parent.lstat()
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ConfigurationError("configuration directory unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ConfigurationError("configuration directory is not regular")
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ConfigurationError("configuration directory permissions are unsafe")
+    return parent
+
+
+def _atomic_write_config(path: Path, raw: Mapping[str, Any]) -> None:
+    """Replace config atomically with mode 0600 and no proxy section."""
+
+    path = _default_path(path)
+    parent = _safe_config_parent(path)
+    if os.path.lexists(str(path)):
+        _safe_config_file(path)
+    # Validate and normalise before writing.  In particular this drops an old
+    # non-empty proxy section during the first successful Options update.
+    config = config_from_mapping(dict(raw), config_path=path)
+    normalized: Dict[str, Any] = {
+        "schema_version": 1,
+        "host_name": HOST_NAME,
+        "server": {
+            "host": config.server_host,
+            "port": config.server_port,
+            "user": config.server_user,
+        },
+        "ssh": {
+            "binary": config.ssh_binary,
+            "identity_file": str(config.identity_file),
+            "known_hosts_file": str(config.known_hosts_file),
+            "connect_timeout": config.connect_timeout,
+        },
+    }
+    payload = json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    fd = -1
+    temporary: Optional[Path] = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(parent))
+        temporary = Path(temporary_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError("cannot write configuration") from exc
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+def _resolve_identity_name(name: str, current: HostConfig) -> Path:
+    if name == LEGACY_IDENTITY_NAME:
+        path = _legacy_identity_path(current)
+        if path is None:
+            raise ConfigurationError("legacy SSH identity unavailable")
+        return path
+    if name in {"config", "known_hosts", "known_hosts.old", "authorized_keys"}:
+        raise ConfigurationError("SSH identity unavailable")
+    # Do not let a browser message choose an arbitrary path.  The selector is
+    # a single filename below ~/.ssh, and the existing file still has to pass
+    # ownership, regular-file, and 0600-or-stricter checks.
+    try:
+        path = _default_path(DEFAULT_SSH_DIR / name)
+        relative = path.relative_to(_default_path(DEFAULT_SSH_DIR))
+    except (ValueError, OSError) as exc:
+        raise ConfigurationError("SSH identity unavailable") from exc
+    if len(relative.parts) != 1 or relative.name != name:
+        raise ConfigurationError("SSH identity unavailable")
+    _safe_key_file(path)
+    if not _identity_looks_private(path):
+        raise ConfigurationError("SSH identity unavailable")
+    return path
+
+
+def _mapping_for_update(current: HostConfig, update: Mapping[str, Any], identity: Path) -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "host_name": HOST_NAME,
+        "server": {
+            "host": update["host"],
+            "port": update["port"],
+            "user": update["user"],
+        },
+        "ssh": {
+            "binary": current.ssh_binary,
+            "identity_file": str(identity),
+            "known_hosts_file": str(current.known_hosts_file),
+            "connect_timeout": current.connect_timeout,
+        },
+    }
+
+
+def process_control_request(raw: bytes, config_path: Path = DEFAULT_CONFIG_PATH) -> Mapping[str, Any]:
+    """Handle get/set locally; this function never invokes SSH."""
+
+    try:
+        action, update = validate_control_request(raw)
+    except ProtocolError:
+        return {"status": "rejected_invalid"}
+
+    try:
+        current = load_config(config_path)
+        if action == "get-config":
+            public = _public_config(current)
+            if public["identityName"] is None:
+                return {"status": "config_error"}
+            return {"status": "config", **public}
+        assert update is not None
+        identity = _resolve_identity_name(str(update["identityName"]), current)
+        _atomic_write_config(config_path, _mapping_for_update(current, update, identity))
+        updated = load_config(config_path)
+        public = _public_config(updated)
+        if public["identityName"] is None:
+            return {"status": "config_error"}
+        return {"status": "config_saved", **public}
+    except (ConfigurationError, OSError, ValueError, TypeError, KeyError):
+        # Never return local paths, exception text, or configuration contents
+        # to the extension.  The fixed status tells the UI to show a generic
+        # actionable error.
+        return {"status": "config_error"}
+
+
+def _looks_like_control_request(raw: bytes) -> bool:
+    """Select the control response channel without accepting loose aliases."""
+
+    try:
+        message = _parse_json_object(raw)
+    except ProtocolError:
+        return False
+    return "action" in message
+
+
+def write_control_response(stream: BinaryIO, response: Mapping[str, Any]) -> None:
+    """Write a strictly shaped local configuration response."""
+
+    status = response.get("status")
+    if status not in ALLOWED_CONTROL_STATUSES:
+        response = {"status": "config_error"}
+    elif status in {"rejected_invalid", "config_error"}:
+        response = {"status": status}
+    else:
+        # Rebuild from the approved public fields so a future caller cannot
+        # accidentally put a path, private key, Cookie, or raw exception in
+        # a response.  Values are validated once more at the boundary.
+        server = response.get("server")
+        identities = response.get("identities")
+        identity_name = response.get("identityName")
+        try:
+            if not isinstance(server, dict) or set(server) != {"host", "port", "user"}:
+                raise ValueError
+            host = server.get("host")
+            if host is not None:
+                _validate_endpoint(host, server.get("user"))
+            _port(server.get("port"))
+            if not isinstance(identity_name, str):
+                raise ValueError
+            if identity_name != LEGACY_IDENTITY_NAME:
+                _validate_identity_name(identity_name)
+            if not isinstance(identities, (list, tuple)):
+                raise ValueError
+            clean_identities = []
+            for item in identities:
+                if not isinstance(item, dict) or set(item) != {"name", "legacy"}:
+                    raise ValueError
+                name = item.get("name")
+                if name != LEGACY_IDENTITY_NAME:
+                    _validate_identity_name(name)
+                if type(item.get("legacy")) is not bool:
+                    raise ValueError
+                clean_identities.append({"name": name, "legacy": item["legacy"]})
+            response = {
+                "status": status,
+                "server": {
+                    "host": host,
+                    "port": server["port"],
+                    "user": server["user"],
+                },
+                "identityName": identity_name,
+                "identities": clean_identities,
+            }
+        except (ConfigurationError, ProtocolError, TypeError, ValueError):
+            response = {"status": "config_error"}
+    payload = json.dumps(response, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    if len(payload) > MAX_FRAME_BYTES:
+        payload = b'{"status":"config_error"}'
+    try:
+        stream.write(encode_frame(payload))
+        flush = getattr(stream, "flush", None)
+        if callable(flush):
+            flush()
+    except (BrokenPipeError, OSError):
+        raise
+
+
 def _safe_stderr(stderr: TextIO, code: str) -> None:
     """Emit a fixed diagnostic, never exception text or command output."""
 
@@ -667,6 +1112,24 @@ def run_host(
         if frame is None:
             return 0
 
+        if _looks_like_control_request(frame):
+            response = process_control_request(frame, config_path)
+            if response.get("status") == "config_saved":
+                # A long-lived connectNative session must use the new endpoint
+                # for the very next synchronisation request.  sendNativeMessage
+                # launches a fresh process, but reloading here keeps both APIs
+                # correct and makes the invariant explicit.
+                try:
+                    config = load_config(config_path)
+                except ConfigurationError:
+                    config = None
+            try:
+                write_control_response(out_stream, response)
+            except (BrokenPipeError, OSError):
+                _safe_stderr(err_stream, "write_failed")
+                return 2
+            continue
+
         if config is None:
             status = "retryable_error"
         else:
@@ -689,7 +1152,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_CONFIG_PATH,
+        default=_runtime_default_config_path(),
         help="path to the local host configuration JSON",
     )
     args = parser.parse_args(argv)

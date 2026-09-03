@@ -90,7 +90,12 @@ def uninstall(
 
     removed: list[Path] = []
     manifest_path = edge_manifest_dir / f"{HOST_NAME}.json"
-    for path in (manifest_path, app_support_dir / "native_host.py", config_path):
+    for path in (
+        manifest_path,
+        app_support_dir / "native_host",
+        app_support_dir / "native_host.py",
+        config_path,
+    ):
         if _remove_regular(path):
             removed.append(path)
 

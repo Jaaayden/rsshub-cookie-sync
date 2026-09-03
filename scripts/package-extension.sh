@@ -64,9 +64,13 @@ RUNTIME_FILES=(
     popup.js
     popup.css
     lib/cookies.js
+    lib/native-config.js
     lib/popup-actions.js
     lib/protocol.js
     lib/state.js
+    options.html
+    options.js
+    options.css
 )
 
 for relative in "${RUNTIME_FILES[@]}"; do
