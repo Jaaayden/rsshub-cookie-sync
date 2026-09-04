@@ -705,7 +705,11 @@ class NativeHostTests(unittest.TestCase):
                 "identityName": "known_hosts",
             }
         ).encode()
-        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+        with mock.patch.object(
+            native_host, "DEFAULT_SSH_DIR", self.identity.parent
+        ), mock.patch.object(
+            native_host, "DEFAULT_KNOWN_HOSTS_FILE", self.known_hosts
+        ):
             self.assertEqual(
                 native_host.process_control_request(message, config_path),
                 {"status": "config_error"},
@@ -774,7 +778,11 @@ class NativeHostTests(unittest.TestCase):
         runner = mock.Mock(
             return_value=CompletedProcess(args=[], returncode=0, stdout=b'{"status":"unchanged"}', stderr=b"")
         )
-        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+        with mock.patch.object(
+            native_host, "DEFAULT_SSH_DIR", self.identity.parent
+        ), mock.patch.object(
+            native_host, "DEFAULT_KNOWN_HOSTS_FILE", self.known_hosts
+        ):
             code = native_host.run_host(
                 config_path=config_path,
                 stdin=io.BytesIO(
