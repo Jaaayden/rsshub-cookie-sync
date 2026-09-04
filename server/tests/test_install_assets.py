@@ -118,8 +118,23 @@ def _fake_command_bin(root: Path) -> Path:
                 esac
                 ;;
             %G) echo rsshub-sync ;;
-            %A) /usr/bin/stat -f '%Sp' "$target" ;;
-            %a) /usr/bin/stat -f '%Lp' "$target" ;;
+            %A)
+                /usr/bin/python3 - "$target" <<'PY'
+        import stat
+        import sys
+
+        print(stat.filemode(__import__("os").lstat(sys.argv[1]).st_mode))
+        PY
+                ;;
+            %a)
+                /usr/bin/python3 - "$target" <<'PY'
+        import os
+        import stat
+        import sys
+
+        print(format(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode), "o"))
+        PY
+                ;;
             *) exit 1 ;;
         esac
         ''',
