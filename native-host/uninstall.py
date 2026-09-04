@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Remove the RSSHub Cookie Sync Native Messaging host from this Mac.
 
-Only the files owned by this installer are considered.  The script never
-recursively deletes an arbitrary directory, and an SSH key outside the
-Application Support directory (if a user edited ``config.json``) is left
-untouched.
+Only exact files owned by this installer are considered.  The script never
+recursively deletes an arbitrary directory, and it keeps SSH keys by default.
+The installed copy is intentionally self-contained: ``install.py`` bundles
+this file beside ``native_host.py`` so it remains usable after the source
+checkout is removed.
 """
 
 from __future__ import annotations
@@ -17,10 +18,21 @@ from typing import Iterable, Optional, Sequence
 
 try:
     from native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME
-    from install import DEFAULT_EDGE_MANIFEST_DIR
 except ImportError:  # pragma: no cover - supports package execution
     from .native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME  # type: ignore
-    from .install import DEFAULT_EDGE_MANIFEST_DIR  # type: ignore
+
+
+DEFAULT_EDGE_MANIFEST_DIR = (
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "Microsoft Edge"
+    / "NativeMessagingHosts"
+)
+DEDICATED_IDENTITY_NAME = "rsshub-cookie-sync"
+DEFAULT_UNINSTALL_DIR = (
+    Path.home() / "Library" / "Application Support" / "rsshub-cookie-sync"
+)
 
 
 def _safe_path(path: Path) -> Path:
@@ -67,13 +79,52 @@ def _remove_empty_dirs(paths: Iterable[Path]) -> None:
             pass
 
 
+def _ask_purge_key() -> bool:
+    """Ask only when a real terminal is attached; otherwise preserve keys."""
+
+    try:
+        if not sys.stdin.isatty():
+            return False
+        print(
+            "是否同时删除项目专用 SSH 密钥 ~/.ssh/rsshub-cookie-sync？[y/N] ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        answer = sys.stdin.readline().strip().lower()
+    except (AttributeError, OSError):
+        return False
+    return answer in {"y", "yes"}
+
+
+def _default_uninstall_dir_for_root(trusted_root: Path) -> Path:
+    """Map the fixed user path into a test/custom home without string hacks."""
+
+    home = _safe_path(Path.home())
+    try:
+        relative = _safe_path(DEFAULT_UNINSTALL_DIR).relative_to(home)
+    except ValueError as exc:  # pragma: no cover - constant sanity check
+        raise RuntimeError("卸载器目录配置不安全") from exc
+    return _safe_path(trusted_root / relative)
+
+
 def uninstall(
     *,
     app_support_dir: Path = DEFAULT_APP_SUPPORT_DIR,
     edge_manifest_dir: Path = DEFAULT_EDGE_MANIFEST_DIR,
+    uninstall_dir: Optional[Path] = None,
+    purge_key: bool = False,
+    prompt_for_key: bool = False,
     allowed_root: Optional[Path] = None,
 ) -> list[Path]:
-    """Remove the host, manifest, config, and installer-generated SSH files."""
+    """Remove the Native Host while preserving SSH material by default.
+
+    ``purge_key`` is deliberately explicit for unattended operation.  The
+    optional ``prompt_for_key`` is used by the CLI when it has a TTY; library
+    callers remain non-interactive unless they opt in.  Only this project's
+    exact dedicated key and the old Application Support key are eligible for
+    removal.  A user's normal ``~/.ssh/id_ed25519`` is never touched.
+    """
 
     trusted_root = _safe_path(allowed_root or Path.home())
     app_support_dir = _managed_directory(
@@ -85,6 +136,11 @@ def uninstall(
         edge_manifest_dir,
         allowed_root=trusted_root,
         label="--edge-manifest-dir",
+    )
+    uninstall_dir = _managed_directory(
+        uninstall_dir or _default_uninstall_dir_for_root(trusted_root),
+        allowed_root=trusted_root,
+        label="卸载器目录",
     )
     config_path = app_support_dir / "config.json"
 
@@ -99,20 +155,41 @@ def uninstall(
         if _remove_regular(path):
             removed.append(path)
 
-    # Remove only known filenames under the managed ssh directory.  Do not
-    # read config.json to discover paths: config is editable and must never be
-    # able to redirect uninstall to an arbitrary file in Application Support.
-    ssh_dir = app_support_dir / "ssh"
-    managed_ssh_files = {
-        ssh_dir / "id_ed25519",
-        ssh_dir / "id_ed25519.pub",
-        ssh_dir / "known_hosts",
-    }
-    for path in sorted(managed_ssh_files):
+    should_purge = purge_key or (prompt_for_key and _ask_purge_key())
+    if should_purge:
+        home_ssh = trusted_root / ".ssh"
+        project_key_files = (
+            home_ssh / DEDICATED_IDENTITY_NAME,
+            home_ssh / f"{DEDICATED_IDENTITY_NAME}.pub",
+            # These are the only key names created by the pre-1.1 installer;
+            # they live inside its private Application Support directory and
+            # are included only when the user explicitly requests purge.
+            app_support_dir / "ssh" / "id_ed25519",
+            app_support_dir / "ssh" / "id_ed25519.pub",
+        )
+        for path in project_key_files:
+            if _remove_regular(path):
+                removed.append(path)
+
+    # The fixed uninstall entry point is self-contained and can remove its
+    # own files after the main host has stopped being referenced by Edge.
+    # Keep the directory if unrelated files are present.
+    for path in (
+        uninstall_dir / "uninstall.sh",
+        uninstall_dir / "uninstall.py",
+        uninstall_dir / "native_host.py",
+    ):
         if _remove_regular(path):
             removed.append(path)
 
-    _remove_empty_dirs((ssh_dir, app_support_dir, edge_manifest_dir))
+    _remove_empty_dirs(
+        (
+            app_support_dir / "ssh",
+            app_support_dir,
+            edge_manifest_dir,
+            uninstall_dir,
+        )
+    )
     return removed
 
 
@@ -120,6 +197,17 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="卸载 RSSHub Cookie Sync Edge Native Messaging host")
     parser.add_argument("--app-support-dir", type=Path, default=DEFAULT_APP_SUPPORT_DIR)
     parser.add_argument("--edge-manifest-dir", type=Path, default=DEFAULT_EDGE_MANIFEST_DIR)
+    parser.add_argument(
+        "--uninstall-dir",
+        type=Path,
+        default=DEFAULT_UNINSTALL_DIR,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--purge-key",
+        action="store_true",
+        help="同时删除项目专用 SSH 密钥；默认保留密钥",
+    )
     return parser.parse_args(argv)
 
 
@@ -129,6 +217,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         removed = uninstall(
             app_support_dir=args.app_support_dir,
             edge_manifest_dir=args.edge_manifest_dir,
+            uninstall_dir=args.uninstall_dir,
+            purge_key=args.purge_key,
+            prompt_for_key=not args.purge_key,
         )
     except (OSError, RuntimeError) as exc:
         print(f"卸载失败：{exc}", file=sys.stderr)
@@ -137,6 +228,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"已移除 {len(removed)} 个 Native host 文件。")
     else:
         print("未找到已安装的 Native host 文件。")
+    home_ssh = _safe_path(Path.home() / ".ssh")
+    app_ssh = _safe_path(args.app_support_dir) / "ssh"
+    project_key_paths = {
+        home_ssh / DEDICATED_IDENTITY_NAME,
+        home_ssh / f"{DEDICATED_IDENTITY_NAME}.pub",
+        app_ssh / "id_ed25519",
+        app_ssh / "id_ed25519.pub",
+    }
+    if any(path in project_key_paths for path in removed):
+        print("项目专用 SSH 密钥已删除；~/.ssh/known_hosts 保留。")
+    else:
+        print("项目专用 SSH 密钥已保留；~/.ssh/known_hosts 保留。")
+    print("请打开 edge://extensions，手动移除 RSSHub Cookie Sync 扩展。")
     return 0
 
 

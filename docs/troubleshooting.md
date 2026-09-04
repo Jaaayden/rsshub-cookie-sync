@@ -27,12 +27,13 @@ Edge 权限 → Native Host → SSH 公钥/主机密钥 → 服务器探针 → 
 
 ## Native Host 不可用
 
-在 Mac 终端重新运行：
+普通安装在 Mac 终端重新运行本机 bootstrap：
 
 ```sh
-cd ~/rsshub-cookie-sync
-python3 native-host/install.py
+curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh
 ```
+
+如果你是从源码目录安装或正在调试，才参考 [Native Host 说明](../native-host/README.md) 中的源码兼容命令；普通安装不需要 clone 仓库或进入源码目录。
 
 然后在 `edge://extensions` 点击扩展“重新加载”。检查以下两点：
 
@@ -46,35 +47,54 @@ python3 native-host/install.py
 打开扩展“连接设置”，确认服务器地址、SSH 端口和密钥文件名。然后确认：
 
 1. 扩展日常连接的用户名固定为 `rsshub-sync`，不是 `root`；`root` 只用于服务端安装和公钥授权；
-2. 选中的私钥位于当前用户的 `~/.ssh/`，并且与服务器上 provision 的 `.pub` 公钥是一对；
-3. `~/.ssh/known_hosts` 中存在目标地址和端口的 Ed25519 条目；
+2. 普通安装选中的是项目专用私钥 `~/.ssh/rsshub-cookie-sync`，并且与服务器上 provision 的 `rsshub-cookie-sync.pub` 公钥是一对；
+3. `~/.ssh/known_hosts` 中存在与目标地址和端口匹配的 OpenSSH 主机记录；
 4. 条目的指纹已经通过服务器控制台或其他独立可信渠道核对；
 5. 服务器端 `rsshub-sync` 账号仍存在，公钥没有被替换或删除。
 
-最常见的原因是“选择了 `id_ed25519`，但没有授权对应的 `id_ed25519.pub`”。先在本机确认指纹：
+最常见的原因是“选择了 `rsshub-cookie-sync`，但没有授权对应的 `rsshub-cookie-sync.pub`”，或者重新 provision 后扩展仍然选择了旧密钥。先在本机确认项目专用公钥指纹：
 
 ```sh
-chmod 600 ~/.ssh/id_ed25519
-ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
+chmod 600 ~/.ssh/rsshub-cookie-sync
+ssh-keygen -lf ~/.ssh/rsshub-cookie-sync.pub -E sha256
 ```
 
-如果 `.pub` 文件不存在，可以在本机派生到同名位置，再查看指纹；放在其他目录不会让它出现在扩展密钥列表中：
+如果 `.pub` 文件不存在，可以在本机从项目专用私钥派生到同名位置，再查看指纹；放在其他目录不会让它出现在扩展密钥列表中：
 
 ```sh
-ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
-chmod 644 ~/.ssh/id_ed25519.pub
-ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
+ssh-keygen -y -f ~/.ssh/rsshub-cookie-sync > ~/.ssh/rsshub-cookie-sync.pub
+chmod 644 ~/.ssh/rsshub-cookie-sync.pub
+ssh-keygen -lf ~/.ssh/rsshub-cookie-sync.pub -E sha256
 ```
 
-确认服务器主机指纹后，用管理员 SSH 连接把对应公钥通过标准输入交给授权程序：
+新手首次安装时，应从 Mac 普通 SSH 登录服务器一次，让 SSH 在确认提示中写入主机条目：
 
 ```sh
+ssh -p <服务器SSH端口> root@<服务器地址>
+```
+
+确认连接目标正确后输入 `yes`，然后保持 root shell，在同一个会话重新运行服务端安装器；当它要求粘贴 Native Host 公钥时，粘贴 `~/.ssh/rsshub-cookie-sync.pub` 的整行内容。不要在新手流程中单独执行 `provision-key`。主机指纹的独立核对和单独 provision 只适用于[高级 SSH 说明](advanced-ssh.md)。
+
+### 旧版配置或通用密钥
+
+如果 `python3 native-host/install.py` 提示检测到旧版或通用 SSH 密钥，说明当前 Native Host 配置仍指向 `id_ed25519` 或其他非项目专用密钥。普通重装会在替换任何本机文件前停止，也不会偷偷改写配置。请先完成下面的两阶段迁移：
+
+```sh
+# 阶段 1：只创建/检查项目专用密钥，不修改旧配置
+python3 native-host/install.py --prepare-dedicated-key
+
+# 先用管理员账号授权新公钥
 ssh -p <管理员SSH端口> root@<服务器地址> \
   /usr/local/sbin/rsshub-cookie-sync-provision-key \
-  < ~/.ssh/id_ed25519.pub
+  < ~/.ssh/rsshub-cookie-sync.pub
+
+# 阶段 2：明确切换到项目专用密钥
+python3 native-host/install.py --activate-dedicated-key
 ```
 
-授权程序每次会替换旧的同步公钥，而不是追加。替换后，仍使用旧私钥的设备会无法同步；因此不要在未确认新私钥可用前替换生产中的旧公钥。
+第二阶段会保留旧配置中的服务器地址和端口，并先用不含 Cookie 的空请求做一次 SSH 认证探测。只有专用公钥和 `known_hosts` 都验证通过，才会替换本机配置；失败时本机旧配置仍保持不变。完成后在扩展“连接设置”选择 `rsshub-cookie-sync` 并保存，再点击“立即同步”。服务器 provision 会立即替换旧同步公钥；如果激活失败，需要用管理员连接重新 provision 旧公钥，才能恢复旧连接。
+
+扩展设置页可以手动选择其他已有 Ed25519 作为高级兼容入口，但不建议使用可能同时登录 `root` 或其他服务器的通用密钥。安装器不会为这类密钥创建或自动迁移配置。
 
 主机密钥校验故意采用严格模式。不要使用“接受未知 key”或关闭校验来绕过错误。
 

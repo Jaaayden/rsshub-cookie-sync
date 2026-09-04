@@ -26,6 +26,8 @@ Options:
   --project-name NAME            Advanced: override the detected Compose project
   --service-name NAME            Advanced: service to recreate (default: rsshub)
   --rsshub-base-url URL          Advanced: local RSSHub URL (default: http://127.0.0.1:1200)
+  --public-key-file ABSOLUTE_PATH
+                                 Install this local ssh-ed25519 key (advanced/non-interactive)
   --replace-deployment           Allow replacing a different saved deployment
   --help                         Show this help
 EOF
@@ -51,6 +53,7 @@ PROJECT=rsshub
 PROJECT_EXPLICIT=0
 SERVICE=rsshub
 RSSHUB_BASE_URL=http://127.0.0.1:1200
+PUBLIC_KEY_FILE=
 REPLACE_DEPLOYMENT=0
 INTERACTIVE=0
 ORIGINAL_ARGC=$#
@@ -147,6 +150,11 @@ while [ "$#" -gt 0 ]; do
             RSSHUB_BASE_URL=$2
             shift 2
             ;;
+        --public-key-file)
+            [ "$#" -ge 2 ] || die "--public-key-file requires an argument"
+            PUBLIC_KEY_FILE=$2
+            shift 2
+            ;;
         --replace-deployment)
             REPLACE_DEPLOYMENT=1
             shift
@@ -202,11 +210,17 @@ STATE_FILE=$STATE_DIR/state.json
 LOCK_FILE=$STATE_DIR/lock
 SSH_USER=rsshub-sync
 SSH_HOME=/var/lib/rsshub-sync
+AUTHORIZED_KEYS=$SSH_HOME/.ssh/authorized_keys
 SSH_CONFIG=/etc/ssh/sshd_config.d/rsshub-cookie-sync.conf
 SERVICE_UNIT=/etc/systemd/system/rsshub-cookie-sync-monitor.service
 TIMER_UNIT=/etc/systemd/system/rsshub-cookie-sync-monitor.timer
 DROPIN_DIR=/etc/systemd/system/rsshub-cookie-sync-monitor.service.d
 DROPIN_FILE=$DROPIN_DIR/deployment.conf
+ACCOUNT_MARKER=$CONFIG_DIR/account-created
+INSTALL_MARKER=$CONFIG_DIR/install-manifest
+SSH_CONFIG_PERSISTENT_BACKUP=$CONFIG_DIR/sshd-config.backup
+SSH_CONFIG_BACKUP_MARKER=$CONFIG_DIR/sshd-config.backup.present
+PERSISTENT_SSH_BACKUP_EXISTS=0
 
 COMPOSE_DIR=$(dirname -- "$COMPOSE_FILE")
 SECRETS_DIR=$COMPOSE_DIR/secrets
@@ -214,8 +228,8 @@ LIVE_ENV=$SECRETS_DIR/rsshub.env
 CANDIDATE_DIR=$SECRETS_DIR/candidates
 
 for command_name in \
-    id install useradd userdel usermod getent sshd visudo stat cp mktemp rm chmod chown \
-    mv awk python3 docker dirname; do
+    id install useradd userdel usermod getent sshd ssh-keygen visudo stat cp mktemp rm chmod chown \
+    mv awk sed dd wc cmp python3 docker dirname; do
     require_command "$command_name"
 done
 [ -x /usr/bin/python3 ] || die "/usr/bin/python3 is missing or not executable"
@@ -261,6 +275,62 @@ assert_source_file() {
     esac
 }
 
+install_marker_is_valid() {
+    /usr/bin/python3 - "$INSTALL_MARKER" <<'PY'
+import pathlib
+import sys
+
+expected = "\n".join(
+    (
+        "rsshub-cookie-sync-installation=1",
+        "service-unit=/etc/systemd/system/rsshub-cookie-sync-monitor.service",
+        "timer-unit=/etc/systemd/system/rsshub-cookie-sync-monitor.timer",
+        "service-dropin=/etc/systemd/system/rsshub-cookie-sync-monitor.service.d/deployment.conf",
+        "ssh-config=/etc/ssh/sshd_config.d/rsshub-cookie-sync.conf",
+        "ssh-user=rsshub-sync",
+        "authorized-keys=/var/lib/rsshub-sync/.ssh/authorized_keys",
+        "install-dir=/usr/local/lib/rsshub-cookie-sync",
+        "apply-wrapper=/usr/local/sbin/rsshub-cookie-sync-apply",
+        "provision-wrapper=/usr/local/sbin/rsshub-cookie-sync-provision-key",
+        "uninstall-wrapper=/usr/local/sbin/rsshub-cookie-sync-uninstall",
+        "sudoers=/etc/sudoers.d/rsshub-cookie-sync",
+        "config-file=/etc/rsshub-cookie-sync/config.json",
+        "state-dir=/var/lib/rsshub-cookie-sync",
+    )
+) + "\n"
+try:
+    actual = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if actual == expected else 1)
+PY
+}
+
+write_install_marker() {
+    marker_tmp=$(mktemp /tmp/rsshub-cookie-sync-install-manifest.XXXXXX)
+    chmod 0600 "$marker_tmp"
+    printf '%s\n' \
+        'rsshub-cookie-sync-installation=1' \
+        'service-unit=/etc/systemd/system/rsshub-cookie-sync-monitor.service' \
+        'timer-unit=/etc/systemd/system/rsshub-cookie-sync-monitor.timer' \
+        'service-dropin=/etc/systemd/system/rsshub-cookie-sync-monitor.service.d/deployment.conf' \
+        'ssh-config=/etc/ssh/sshd_config.d/rsshub-cookie-sync.conf' \
+        'ssh-user=rsshub-sync' \
+        'authorized-keys=/var/lib/rsshub-sync/.ssh/authorized_keys' \
+        'install-dir=/usr/local/lib/rsshub-cookie-sync' \
+        'apply-wrapper=/usr/local/sbin/rsshub-cookie-sync-apply' \
+        'provision-wrapper=/usr/local/sbin/rsshub-cookie-sync-provision-key' \
+        'uninstall-wrapper=/usr/local/sbin/rsshub-cookie-sync-uninstall' \
+        'sudoers=/etc/sudoers.d/rsshub-cookie-sync' \
+        'config-file=/etc/rsshub-cookie-sync/config.json' \
+        'state-dir=/var/lib/rsshub-cookie-sync' \
+        > "$marker_tmp"
+    mv -f "$marker_tmp" "$INSTALL_MARKER"
+    marker_tmp=
+    install_marker_created=1
+    chmod 0600 "$INSTALL_MARKER"
+}
+
 # Check every existing parent.  In addition to the Compose file itself, this
 # rejects a symlinked or user-owned directory that could redirect secrets or
 # the generated systemd write allowance.
@@ -303,6 +373,21 @@ for managed_dir in "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"; do
 done
 if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
     assert_root_file "$CONFIG_FILE"
+fi
+if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ]; then
+    assert_root_file "$INSTALL_MARKER"
+    install_marker_is_valid || die "install ownership manifest is invalid"
+fi
+if [ -e "$SSH_CONFIG_PERSISTENT_BACKUP" ] || [ -L "$SSH_CONFIG_PERSISTENT_BACKUP" ]; then
+    assert_root_file "$SSH_CONFIG_PERSISTENT_BACKUP"
+    PERSISTENT_SSH_BACKUP_EXISTS=1
+fi
+if [ -e "$SSH_CONFIG_BACKUP_MARKER" ] || [ -L "$SSH_CONFIG_BACKUP_MARKER" ]; then
+    assert_root_file "$SSH_CONFIG_BACKUP_MARKER"
+    [ "$(sed -n '1p' "$SSH_CONFIG_BACKUP_MARKER")" = "rsshub-cookie-sync-sshd-backup=1" ] \
+        || die "SSH 配置备份标记无效"
+    [ "$PERSISTENT_SSH_BACKUP_EXISTS" -eq 1 ] \
+        || die "SSH 配置备份标记存在但备份文件缺失"
 fi
 
 # A no-argument reinstall should preserve the target that was already
@@ -414,22 +499,239 @@ validate_existing_account() {
     [ "$all_groups" = "$primary_group" ] || die "$SSH_USER has supplementary groups"
     [ ! -L "$account_home" ] || die "$SSH_USER home must not be a symlink"
     [ -d "$account_home" ] || die "$SSH_USER home is missing"
+    [ "$(stat -c '%U' -- "$account_home")" = "$SSH_USER" ] \
+        || die "$SSH_USER home has an unexpected owner"
+    [ "$(stat -c '%G' -- "$account_home")" = "$primary_group" ] \
+        || die "$SSH_USER home has an unexpected group"
+    home_mode=$(stat -c '%A' -- "$account_home") \
+        || die "cannot inspect $SSH_USER home permissions"
+    case "$home_mode" in
+        ?????w????|????????w?) die "$SSH_USER home must not be writable by group or others" ;;
+    esac
+    if [ -e "$account_home/.ssh" ] || [ -L "$account_home/.ssh" ]; then
+        [ ! -L "$account_home/.ssh" ] && [ -d "$account_home/.ssh" ] \
+            || die "$SSH_USER .ssh must be a regular directory"
+        [ "$(stat -c '%U' -- "$account_home/.ssh")" = "$SSH_USER" ] \
+            || die "$SSH_USER .ssh has an unexpected owner"
+        [ "$(stat -c '%G' -- "$account_home/.ssh")" = "$primary_group" ] \
+            || die "$SSH_USER .ssh has an unexpected group"
+        [ "$(stat -c '%a' -- "$account_home/.ssh")" = 700 ] \
+            || die "$SSH_USER .ssh permissions must be 0700"
+    fi
+}
+
+validate_locked_account_password() {
+    shadow_line=$(getent shadow "$SSH_USER" 2>/dev/null) \
+        || die "cannot read $SSH_USER password state"
+    password_field=$(printf '%s\n' "$shadow_line" | awk -F: 'NR == 1 { print $2 }')
+    case "$password_field" in
+        '!'*|'*'*) ;;
+        *) die "existing $SSH_USER password must already be locked" ;;
+    esac
 }
 
 if id "$SSH_USER" >/dev/null 2>&1; then
     validate_existing_account
+    # Reusing a deliberately prepared account is supported, but the installer
+    # must not silently lock an administrator's ordinary account and then be
+    # unable to restore that password state during uninstall.
+    validate_locked_account_password
 elif [ -e "$SSH_HOME" ] || [ -L "$SSH_HOME" ]; then
     die "$SSH_HOME already exists without the managed account"
 fi
+
+# The server side never needs to know the private key.  A public key is only
+# required when a fresh account has no usable project authorization.  On a
+# reinstall, keep the exact existing authorized_keys line unless the operator
+# explicitly supplies --public-key-file.
+validate_public_key_file() {
+    key_path=$1
+    [ -n "$key_path" ] || return 1
+    case "$key_path" in
+        /*) ;;
+        *) echo "公钥文件路径必须是绝对路径。" >&2; return 1 ;;
+    esac
+    [ ! -L "$key_path" ] || { echo "公钥文件不能是符号链接。" >&2; return 1; }
+    [ -f "$key_path" ] || { echo "公钥文件不存在或不是普通文件。" >&2; return 1; }
+    key_size=$(wc -c < "$key_path") || return 1
+    [ "$key_size" -le 8192 ] || { echo "公钥文件过大。" >&2; return 1; }
+    key_lines=$(awk 'END { print NR }' "$key_path") || return 1
+    [ "$key_lines" -eq 1 ] || { echo "公钥必须只有一行。" >&2; return 1; }
+    if ! /usr/bin/python3 -c 'import pathlib,sys; raise SystemExit(1 if b"\x00" in pathlib.Path(sys.argv[1]).read_bytes() else 0)' "$key_path"; then
+        echo "公钥包含不允许的控制字符。" >&2
+        return 1
+    fi
+    key_line=$(sed -n '1p' "$key_path") || return 1
+    case "$key_line" in
+        ssh-ed25519\ *) ;;
+        *) echo "公钥必须是 ssh-ed25519 格式。" >&2; return 1 ;;
+    esac
+    case "$key_line" in
+        *"$(printf '\r')"*)
+            echo "公钥包含不允许的控制字符。" >&2
+            return 1
+            ;;
+    esac
+    if ! printf '%s\n' "$key_line" | ssh-keygen -lf - >/dev/null 2>&1; then
+        echo "公钥不是有效的 OpenSSH 公钥。" >&2
+        return 1
+    fi
+    return 0
+}
+
+assert_authorized_keys_path() {
+    if [ -L "$AUTHORIZED_KEYS" ]; then
+        die "$AUTHORIZED_KEYS must not be a symlink"
+    fi
+    if [ -e "$AUTHORIZED_KEYS" ] && [ ! -f "$AUTHORIZED_KEYS" ]; then
+        die "$AUTHORIZED_KEYS is not a regular file"
+    fi
+}
+
+# Return success only for the exact restricted line written by
+# provision-ssh-key.sh.  The raw line is deliberately left untouched on a
+# reinstall; this check is only a gate for deciding whether a new key is
+# required.
+has_valid_managed_authorized_key() {
+    assert_authorized_keys_path
+    [ -f "$AUTHORIZED_KEYS" ] || return 1
+    auth_owner=$(stat -c '%U' -- "$AUTHORIZED_KEYS" 2>/dev/null || true)
+    [ "$auth_owner" = "$SSH_USER" ] || return 1
+    auth_mode=$(stat -c '%A' -- "$AUTHORIZED_KEYS" 2>/dev/null || true)
+    case "$auth_mode" in
+        ?????w????|????????w?) return 1 ;;
+    esac
+    managed_lines=$(awk '/^restrict,command="sudo -n \/usr\/local\/sbin\/rsshub-cookie-sync-apply" ssh-ed25519 / { count++ } END { print count + 0 }' \
+        "$AUTHORIZED_KEYS" 2>/dev/null || echo 0)
+    [ "$managed_lines" -eq 1 ] || return 1
+    auth_line=$(sed -n '/^restrict,command="sudo -n \/usr\/local\/sbin\/rsshub-cookie-sync-apply" ssh-ed25519 /p' \
+        "$AUTHORIZED_KEYS" 2>/dev/null || true)
+    case "$auth_line" in
+        'restrict,command="sudo -n /usr/local/sbin/rsshub-cookie-sync-apply" ssh-ed25519 '* )
+            auth_key=$(printf '%s\n' "$auth_line" | sed -n \
+                's/^restrict,command="sudo -n \/usr\/local\/sbin\/rsshub-cookie-sync-apply" \(ssh-ed25519 [^ ]*\).*$/\1/p')
+            [ -n "$auth_key" ] || return 1
+            printf '%s\n' "$auth_key" | ssh-keygen -lf - >/dev/null 2>&1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+read_public_key_from_tty() {
+    [ -r /dev/tty ] || die "首次安装必须提供 SSH 公钥；请在交互式终端运行，或使用 --public-key-file"
+    while :; do
+        printf '%s' "请粘贴本机安装器输出的一整行 ssh-ed25519 公钥（输入 q 取消）： " >&2
+        IFS= read -r key_line < /dev/tty || die "没有读取到 SSH 公钥，安装已取消"
+        [ "$key_line" = q ] && die "安装已取消"
+        key_tmp_input=$(mktemp /tmp/rsshub-cookie-sync-public-key.XXXXXX)
+        chmod 0600 "$key_tmp_input"
+        printf '%s\n' "$key_line" > "$key_tmp_input"
+        if validate_public_key_file "$key_tmp_input" >/dev/null 2>&1; then
+            return 0
+        fi
+        rm -f "$key_tmp_input"
+        key_tmp_input=
+        echo "公钥无效，请重新粘贴；不要粘贴私钥。" >&2
+    done
+}
+
+stage_public_key() {
+    if [ -n "$PUBLIC_KEY_FILE" ]; then
+        validate_public_key_file "$PUBLIC_KEY_FILE" || die "公钥文件无效，安装已停止"
+        key_tmp_input=$(mktemp /tmp/rsshub-cookie-sync-public-key.XXXXXX)
+        chmod 0600 "$key_tmp_input"
+        # The key is public, but keeping a private temporary mode avoids
+        # surprising exposure in shared temporary directories.
+        cp "$PUBLIC_KEY_FILE" "$key_tmp_input" || die "无法读取公钥文件"
+        validate_public_key_file "$key_tmp_input" || die "公钥文件在读取时发生变化"
+    elif [ "$existing_managed_key" -eq 0 ]; then
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            read_public_key_from_tty
+        else
+            die "首次安装或现有授权无效；请使用 --public-key-file 提供 ssh-ed25519 公钥"
+        fi
+    fi
+}
+
+existing_managed_key=0
+if id "$SSH_USER" >/dev/null 2>&1 && has_valid_managed_authorized_key; then
+    existing_managed_key=1
+fi
+
+# A v1.1.2 installation predates the marker.  It is safe to migrate the
+# marker only when all distinctive project assets already exist and the
+# account has the exact forced-command key.  Otherwise the account remains
+# pre-existing and the uninstaller will never delete it.
+legacy_account_candidate=0
+legacy_assets_match() {
+    [ -f "$CONFIG_FILE" ] && [ -f "$SSH_CONFIG" ] \
+        && [ -f "$SERVICE_UNIT" ] && [ -f "$TIMER_UNIT" ] \
+        && [ -f "$INSTALL_DIR/rsshub_cookie_sync.py" ] \
+        && [ -f "$INSTALL_DIR/rsshub-cookie-sync" ] \
+        && [ -f "$SBIN_DIR/rsshub-cookie-sync-apply" ] \
+        && [ -f "$SBIN_DIR/rsshub-cookie-sync-provision-key" ] \
+        && [ -f /etc/sudoers.d/rsshub-cookie-sync ] || return 1
+    cmp -s "$SCRIPT_DIR/rsshub_cookie_sync.py" "$INSTALL_DIR/rsshub_cookie_sync.py" || return 1
+    cmp -s "$SCRIPT_DIR/rsshub-cookie-sync" "$INSTALL_DIR/rsshub-cookie-sync" || return 1
+    cmp -s "$SCRIPT_DIR/rsshub-cookie-sync-apply" "$SBIN_DIR/rsshub-cookie-sync-apply" || return 1
+    cmp -s "$SCRIPT_DIR/provision-ssh-key.sh" "$SBIN_DIR/rsshub-cookie-sync-provision-key" || return 1
+    cmp -s "$SCRIPT_DIR/sudoers.example" /etc/sudoers.d/rsshub-cookie-sync || return 1
+    cmp -s "$SCRIPT_DIR/sshd-rsshub-cookie-sync.conf" "$SSH_CONFIG" || return 1
+    cmp -s "$SCRIPT_DIR/rsshub-cookie-sync-monitor.service" "$SERVICE_UNIT" || return 1
+    cmp -s "$SCRIPT_DIR/rsshub-cookie-sync-monitor.timer" "$TIMER_UNIT" || return 1
+    /usr/bin/python3 - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    deployment = data.get("deployment")
+    required = {"compose_file", "live_env", "candidate_dir", "state_file", "lock_file", "project", "service"}
+    if not isinstance(deployment, dict) or not required.issubset(deployment):
+        raise ValueError
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+if id "$SSH_USER" >/dev/null 2>&1 && [ ! -e "$ACCOUNT_MARKER" ] && [ "$existing_managed_key" -eq 1 ] \
+    && legacy_assets_match; then
+    legacy_account_candidate=1
+fi
+
+if [ -e "$ACCOUNT_MARKER" ] || [ -L "$ACCOUNT_MARKER" ]; then
+    assert_root_file "$ACCOUNT_MARKER"
+    marker_value=$(sed -n '1p' "$ACCOUNT_MARKER")
+    [ "$marker_value" = "rsshub-cookie-sync-account-created=1" ] \
+        || die "account-created marker is invalid"
+fi
+
+# Older releases used the same Match/ForceCommand boundary but may have
+# changed comments or whitespace.  Treat semantically identical files as
+# project-owned, so upgrading v1.1.2 does not create a backup that uninstall
+# would later restore as if it were an administrator's SSH configuration.
+ssh_config_matches_project() {
+    [ -f "$SSH_CONFIG" ] || return 1
+    if cmp -s "$SSH_CONFIG" "$SCRIPT_DIR/sshd-rsshub-cookie-sync.conf"; then
+        return 0
+    fi
+    current_ssh_rules=$(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$SSH_CONFIG") || return 1
+    expected_ssh_rules=$(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' \
+        "$SCRIPT_DIR/sshd-rsshub-cookie-sync.conf") || return 1
+    [ "$current_ssh_rules" = "$expected_ssh_rules" ]
+}
 
 install_ok=0
 ssh_config_touched=0
 ssh_config_existed=0
 ssh_config_backup=
+ssh_config_persistent_backup_created=0
 systemd_units_touched=0
 timer_touched=0
 timer_was_active=0
 timer_was_enabled=0
+service_was_active=0
 service_unit_existed=0
 timer_unit_existed=0
 dropin_existed=0
@@ -442,6 +744,13 @@ migration_started=0
 dropin_tmp=
 asset_backup_dir=
 account_created=0
+account_marker_touched=0
+account_marker_existed=0
+install_marker_created=0
+marker_tmp=
+authorized_keys_touched=0
+authorized_keys_existed=0
+authorized_keys_backup=
 
 backup_managed_asset() {
     asset_target=$1
@@ -473,6 +782,55 @@ restore_installed_assets() {
     restore_managed_asset "$SBIN_DIR/rsshub-cookie-sync-uninstall" uninstall
     restore_managed_asset /etc/sudoers.d/rsshub-cookie-sync sudoers
     rmdir "$INSTALL_DIR" 2>/dev/null || true
+}
+
+backup_authorized_keys() {
+    assert_authorized_keys_path
+    if [ -e "$AUTHORIZED_KEYS" ]; then
+        auth_owner=$(stat -c '%U' -- "$AUTHORIZED_KEYS") || die "cannot inspect $AUTHORIZED_KEYS"
+        [ "$auth_owner" = "$SSH_USER" ] || die "$AUTHORIZED_KEYS is not owned by $SSH_USER"
+        auth_mode=$(stat -c '%A' -- "$AUTHORIZED_KEYS") || die "cannot inspect $AUTHORIZED_KEYS permissions"
+        case "$auth_mode" in
+            ?????w????|????????w?) die "$AUTHORIZED_KEYS must not be writable by group or others" ;;
+        esac
+        authorized_keys_existed=1
+        authorized_keys_backup=$(mktemp /tmp/rsshub-cookie-sync-authorized-keys.XXXXXX)
+        cp -p "$AUTHORIZED_KEYS" "$authorized_keys_backup"
+        chmod 0600 "$authorized_keys_backup"
+    fi
+}
+
+restore_authorized_keys() {
+    [ "$authorized_keys_touched" -eq 1 ] || return 0
+    rm -f "$AUTHORIZED_KEYS"
+    if [ "$authorized_keys_existed" -eq 1 ]; then
+        cp -p "$authorized_keys_backup" "$AUTHORIZED_KEYS"
+        chown "$SSH_USER:$SSH_GROUP" "$AUTHORIZED_KEYS"
+        chmod 0600 "$AUTHORIZED_KEYS"
+    fi
+}
+
+write_account_marker() {
+    [ "$account_created" -eq 1 ] || [ "$legacy_account_candidate" -eq 1 ] || return 0
+    if [ -e "$ACCOUNT_MARKER" ]; then
+        account_marker_existed=1
+        return 0
+    fi
+    install -m 0600 /dev/null "$ACCOUNT_MARKER"
+    printf '%s\n' "rsshub-cookie-sync-account-created=1" > "$ACCOUNT_MARKER"
+    account_marker_touched=1
+}
+
+restore_account_marker() {
+    [ "$account_marker_touched" -eq 1 ] || return 0
+    if [ "$account_marker_existed" -eq 0 ]; then
+        rm -f "$ACCOUNT_MARKER"
+    fi
+}
+
+restore_install_marker() {
+    [ "$install_marker_created" -eq 1 ] || return 0
+    rm -f "$INSTALL_MARKER"
 }
 
 restore_ssh_config() {
@@ -560,6 +918,12 @@ rollback_install() {
         rollback_failed=1
         echo "rsshub-cookie-sync install: failed to restore installed program files" >&2
     fi
+    if ! restore_authorized_keys; then
+        rollback_failed=1
+        echo "rsshub-cookie-sync install: failed to restore authorized_keys" >&2
+    fi
+    restore_account_marker
+    restore_install_marker
     if [ "$account_created" -eq 1 ] && id "$SSH_USER" >/dev/null 2>&1; then
         if ! userdel --remove "$SSH_USER" >/dev/null 2>&1; then
             rollback_failed=1
@@ -579,9 +943,18 @@ rollback_install() {
             echo "rsshub-cookie-sync install: failed to restore monitor timer" >&2
         fi
     fi
+    if [ "$service_was_active" -eq 1 ]; then
+        if ! systemctl start rsshub-cookie-sync-monitor.service >/dev/null 2>&1; then
+            rollback_failed=1
+            echo "rsshub-cookie-sync install: failed to restart monitor service" >&2
+        fi
+    fi
 
     if [ -n "$dropin_tmp" ]; then
         rm -f "$dropin_tmp"
+    fi
+    if [ -n "$marker_tmp" ]; then
+        rm -f "$marker_tmp"
     fi
     if [ -n "$unit_backup_dir" ]; then
         rm -rf "$unit_backup_dir"
@@ -589,11 +962,20 @@ rollback_install() {
     if [ -n "$ssh_config_backup" ]; then
         rm -f "$ssh_config_backup"
     fi
+    if [ "$ssh_config_persistent_backup_created" -eq 1 ]; then
+        rm -f "$SSH_CONFIG_PERSISTENT_BACKUP" "$SSH_CONFIG_BACKUP_MARKER"
+    fi
     if [ -n "$config_backup" ]; then
         rm -f "$config_backup"
     fi
     if [ -n "$asset_backup_dir" ]; then
         rm -rf "$asset_backup_dir"
+    fi
+    if [ -n "$authorized_keys_backup" ]; then
+        rm -f "$authorized_keys_backup"
+    fi
+    if [ -n "$key_tmp_input" ]; then
+        rm -f "$key_tmp_input"
     fi
     if [ "$rollback_failed" -ne 0 ]; then
         echo "rsshub-cookie-sync install: rollback was incomplete; inspect the host before retrying" >&2
@@ -611,6 +993,12 @@ handle_signal() {
 trap rollback_install EXIT
 trap handle_signal HUP INT TERM
 
+# Validate and stage the public key before any deployment mutation.  The EXIT
+# trap is already active so a cancelled/failed prompt cannot leave a temporary
+# key file behind.
+key_tmp_input=
+stage_public_key
+
 finish_interactive_setup() {
     [ "$INTERACTIVE" -eq 1 ] || return 0
     [ -r /dev/tty ] || return 0
@@ -627,17 +1015,6 @@ finish_interactive_setup() {
         fi
     fi
 
-    echo >&2
-    if ask_yes_no "现在安装 Edge Native Host 的 SSH 公钥吗"; then
-        echo "请粘贴一整行 ssh-ed25519 公钥后按回车（仅接受一行，公钥不是私钥）：" >&2
-        IFS= read -r public_key < /dev/tty || public_key=
-        if [ -n "$public_key" ] && printf '%s\n' "$public_key" | \
-            "$SBIN_DIR/rsshub-cookie-sync-provision-key" >/dev/null 2>&1; then
-            echo "SSH 公钥已安装。" >&2
-        else
-            echo "SSH 公钥安装失败；安装已完成，可稍后运行 rsshub-cookie-sync-provision-key。" >&2
-        fi
-    fi
 }
 
 # Freeze the existing scheduler before touching config, Compose, or its
@@ -659,6 +1036,7 @@ if [ "$timer_was_active" -eq 1 ] || [ "$timer_was_enabled" -eq 1 ]; then
     fi
 fi
 if systemctl is-active --quiet rsshub-cookie-sync-monitor.service; then
+    service_was_active=1
     if ! systemctl stop rsshub-cookie-sync-monitor.service >/dev/null 2>&1; then
         die "failed to stop the running monitor service"
     fi
@@ -729,6 +1107,7 @@ if ! id "$SSH_USER" >/dev/null 2>&1; then
 fi
 validate_existing_account
 usermod --shell /bin/sh --lock "$SSH_USER"
+validate_locked_account_password
 SSH_GROUP=$(id -gn "$SSH_USER")
 if [ -L "$SSH_HOME/.ssh" ]; then
     die "$SSH_HOME/.ssh must not be a symlink"
@@ -737,6 +1116,19 @@ if [ -e "$SSH_HOME/.ssh" ] && [ ! -d "$SSH_HOME/.ssh" ]; then
     die "$SSH_HOME/.ssh is not a directory"
 fi
 install -d -o "$SSH_USER" -g "$SSH_GROUP" -m 0700 "$SSH_HOME/.ssh"
+
+# Keep the prior authorized_keys file available until the whole installation
+# transaction has succeeded.  A supplied --public-key-file is an explicit key
+# replacement; otherwise a valid existing restricted key is preserved byte for
+# byte.  Fresh installs and legacy installs without a valid key must have one.
+backup_authorized_keys
+if [ -n "$key_tmp_input" ]; then
+    authorized_keys_touched=1
+    if ! "$SCRIPT_DIR/provision-ssh-key.sh" < "$key_tmp_input" >/dev/null 2>&1; then
+        die "SSH 公钥安装失败"
+    fi
+fi
+write_account_marker
 
 install -m 0440 "$SCRIPT_DIR/sudoers.example" /etc/sudoers.d/rsshub-cookie-sync
 if ! visudo -cf /etc/sudoers.d/rsshub-cookie-sync >/dev/null 2>&1; then
@@ -752,6 +1144,16 @@ if [ -e "$SSH_CONFIG" ]; then
     ssh_config_backup=$(mktemp /tmp/rsshub-cookie-sync-sshd.XXXXXX)
     cp -p "$SSH_CONFIG" "$ssh_config_backup"
     chmod 0600 "$ssh_config_backup"
+    if [ "$PERSISTENT_SSH_BACKUP_EXISTS" -eq 0 ] && ! ssh_config_matches_project; then
+        if [ -e "$SSH_CONFIG_PERSISTENT_BACKUP" ] || [ -L "$SSH_CONFIG_PERSISTENT_BACKUP" ] \
+            || [ -e "$SSH_CONFIG_BACKUP_MARKER" ] || [ -L "$SSH_CONFIG_BACKUP_MARKER" ]; then
+            die "SSH 配置备份路径已被占用，无法安全保存原文件"
+        fi
+        install -m 0600 "$ssh_config_backup" "$SSH_CONFIG_PERSISTENT_BACKUP"
+        install -m 0600 /dev/null "$SSH_CONFIG_BACKUP_MARKER"
+        printf '%s\n' "rsshub-cookie-sync-sshd-backup=1" > "$SSH_CONFIG_BACKUP_MARKER"
+        ssh_config_persistent_backup_created=1
+    fi
 fi
 install -m 0644 "$SCRIPT_DIR/sshd-rsshub-cookie-sync.conf" "$SSH_CONFIG"
 ssh_config_touched=1
@@ -837,6 +1239,35 @@ fi
 timer_touched=1
 systemctl enable --now rsshub-cookie-sync-monitor.timer
 
+if [ ! -e "$INSTALL_MARKER" ]; then
+    write_install_marker
+fi
+
+# Do not print a success message merely because the mutation commands returned
+# zero.  Verify every externally visible boundary the installer promises:
+# account/key restrictions, SSH and sudo syntax, loaded units, active timer,
+# and the root-only deployment configuration.
+validate_existing_account
+validate_locked_account_password
+has_valid_managed_authorized_key || die "installed rsshub-sync authorization failed validation"
+visudo -cf /etc/sudoers.d/rsshub-cookie-sync >/dev/null 2>&1 \
+    || die "installed sudoers validation failed"
+sshd -t >/dev/null 2>&1 || die "installed sshd configuration validation failed"
+assert_root_file "$CONFIG_FILE"
+assert_root_file "$INSTALL_MARKER"
+install_marker_is_valid || die "install ownership manifest failed validation"
+[ "$(systemctl show -p LoadState --value rsshub-cookie-sync-monitor.service)" = loaded ] \
+    || die "monitor service is not loaded"
+[ "$(systemctl show -p LoadState --value rsshub-cookie-sync-monitor.timer)" = loaded ] \
+    || die "monitor timer is not loaded"
+systemctl is-enabled --quiet rsshub-cookie-sync-monitor.timer \
+    || die "monitor timer is not enabled"
+systemctl is-active --quiet rsshub-cookie-sync-monitor.timer \
+    || die "monitor timer is not active"
+
+# Finalization deletes the temporary Compose/env backups.  Keep it as the last
+# fallible installation step so every validation failure above can still use
+# those backups through rollback-migration.
 if [ "$migration_pending" = true ]; then
     /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
         --config "$CONFIG_FILE" finalize-migration --json >/dev/null
@@ -856,9 +1287,20 @@ fi
 if [ -n "$asset_backup_dir" ]; then
     rm -rf "$asset_backup_dir"
 fi
+if [ -n "$authorized_keys_backup" ]; then
+    rm -f "$authorized_keys_backup"
+fi
+if [ -n "$key_tmp_input" ]; then
+    rm -f "$key_tmp_input"
+fi
 finish_interactive_setup
 if [ "$INTERACTIVE" -eq 1 ]; then
+    if [ "$existing_managed_key" -eq 1 ] && [ "$authorized_keys_touched" -eq 0 ]; then
+        echo "已保留现有的 rsshub-sync SSH 公钥。" >&2
+    else
+        echo "SSH 公钥已安装到 rsshub-sync。" >&2
+    fi
     echo "RSSHub Cookie sync 服务端安装完成。" >&2
 else
-    echo "RSSHub Cookie sync server installed. Add a public key with rsshub-cookie-sync-provision-key, configure Bark through stdin, then run notify-test."
+    echo "RSSHub Cookie sync server installed. The rsshub-sync key is configured; configure Bark through stdin, then run notify-test."
 fi

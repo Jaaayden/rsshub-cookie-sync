@@ -55,8 +55,10 @@ DEFAULT_APP_SUPPORT_DIR = (
 DEFAULT_CONFIG_PATH = DEFAULT_APP_SUPPORT_DIR / "config.json"
 # Keep the SSH material in the user's normal SSH directory.  The private key
 # is never read by the extension; this path is only handed to OpenSSH by the
-# Native Messaging host.  Operators may point the installer at another file
-# directly below ``~/.ssh`` when reusing an existing key.
+# Native Messaging host.  The installer deliberately creates a separate key
+# instead of adopting a generic identity that may already unlock root.  The
+# Options page can still expose an existing Ed25519 key as an explicit,
+# warned compatibility choice; it is never selected automatically.
 DEFAULT_SSH_DIR = Path.home() / ".ssh"
 DEFAULT_IDENTITY_FILE = DEFAULT_SSH_DIR / "rsshub-cookie-sync"
 DEFAULT_KNOWN_HOSTS_FILE = DEFAULT_SSH_DIR / "known_hosts"
@@ -445,8 +447,6 @@ def build_ssh_argv(config: HostConfig) -> Tuple[str, ...]:
         "GlobalKnownHostsFile=/dev/null",
         "-o",
         "UpdateHostKeys=no",
-        "-o",
-        "HostKeyAlgorithms=ssh-ed25519",
         "-o",
         "CheckHostIP=no",
         "-o",
@@ -1011,7 +1011,10 @@ def _mapping_for_update(current: HostConfig, update: Mapping[str, Any], identity
         "ssh": {
             "binary": current.ssh_binary,
             "identity_file": str(identity),
-            "known_hosts_file": str(current.known_hosts_file),
+            # A user-initiated save is also the safe migration point from old
+            # Application Support trust stores to OpenSSH's standard file.
+            # Runtime matching remains entirely delegated to OpenSSH.
+            "known_hosts_file": str(_default_path(DEFAULT_KNOWN_HOSTS_FILE)),
             "connect_timeout": current.connect_timeout,
         },
     }

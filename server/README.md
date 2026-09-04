@@ -13,13 +13,19 @@
 - `sudo` 软件包（安装器用 `visudo` 验证受限账号的最小权限）；
 - 已经可以启动的 RSSHub Compose 文件；
 - 服务器能访问知乎、微博；
-- SSH 服务正在运行，并且有 Ed25519 主机密钥。
+- SSH 服务正在运行。主机密钥类型由 OpenSSH 协商，不限定为 Ed25519。
 
 `format: raw` 是为了原样读取 Cookie 中的特殊字符，需要 Compose v2.30+。版本不足时先升级 Compose，不要把 Cookie 改回 YAML。
 
 ## 一键安装
 
-以 root 登录服务器，执行：
+新手推荐先在 Mac 上运行项目首页的本机安装命令，复制安装器显示的 `ssh-ed25519` 公钥；然后从 Mac 普通 SSH 登录服务器一次，在首次主机指纹提示处确认并输入 `yes`。保持这个 root shell 不要退出，直接在同一个会话中执行：
+
+```sh
+ssh -p <服务器SSH端口> root@<服务器地址>
+```
+
+进入服务器后执行：
 
 ```sh
 curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh
@@ -32,9 +38,9 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 3. 让 Docker Compose 自动解析 project 名称；
 4. 默认把 RSSHub 健康地址设为 `http://127.0.0.1:1200`；
 5. 询问是否配置 Bark；
-6. 询问是否粘贴 Native Host 公钥。
+6. 在开始部署前要求粘贴 Native Host 公钥；把刚才在 Mac 上复制的那一整行公钥粘贴进去。
 
-普通安装不需要填写 project、service 或健康地址。Compose 在其他位置时，安装器会提示输入绝对路径。项目源码也可以直接安装：
+普通安装不需要填写 project、service 或健康地址，也不需要另开终端执行 `provision-key`。Compose 在其他位置时，安装器会提示输入绝对路径。项目源码也可以直接安装：
 
 ```sh
 cd /path/to/rsshub-cookie-sync/server
@@ -97,15 +103,9 @@ Device Key 保存在服务器权限为 `0600` 的配置文件中，请勿把命�
 
 ## Native Host 公钥
 
-Native Host 安装器会在 Mac 上默认创建 `~/.ssh/rsshub-cookie-sync`，并在屏幕上显示对应的公钥。服务器安装时可以直接粘贴这一行；如果当时跳过，请先按项目首页核对服务器 SSH 主机指纹，再使用已经确认过主机身份的管理员连接执行：
+Native Host 安装器会在 Mac 上默认创建 `~/.ssh/rsshub-cookie-sync`，并在屏幕上显示对应的公钥。新手流程中不需要单独执行授权命令：保持首次普通 SSH 登录进入的 root shell，在服务端安装器要求粘贴 Native Host 公钥时，直接粘贴这一整行公钥即可。
 
-```sh
-ssh -p <管理员SSH端口> root@<服务器地址> \
-  /usr/local/sbin/rsshub-cookie-sync-provision-key \
-  < ~/.ssh/rsshub-cookie-sync.pub
-```
-
-公钥通过标准输入传输，不出现在远程命令参数中。私钥永远不上传。复用其他密钥时，把最后的 `.pub` 路径替换为对应文件。
+公钥通过安装器的标准输入传入服务器，不会出现在远程命令参数中；私钥永远不上传。服务器安装器会创建固定的 `rsshub-sync` 受限账号并安装这把公钥。首次安装时如果跳过了公钥，或需要更换密钥，请阅读[高级 SSH 说明](../docs/advanced-ssh.md)中的单独 provision 和迁移流程；不要把它作为新手安装步骤。
 
 服务器为同步器创建独立的 `rsshub-sync` 账号：禁用密码登录、无 Docker 组权限，只能运行固定的受限命令。不要把这个账号改成普通 shell 账号，也不要手工追加任意命令。
 
@@ -175,7 +175,19 @@ journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 sudo /usr/local/sbin/rsshub-cookie-sync-uninstall
 ```
 
-卸载会停用同步器 timer，移除同步器程序、systemd 单元、受限 SSH 账号和配置；不会把 secret 写回 Compose，不会删除当前 `rsshub.env`、RSSHub 容器、volume 或 Redis。这样 RSSHub 会继续使用最后一次 live 配置运行。确认不再需要回滚后，再由管理员逐项清理 secrets 和状态。
+如果当前 root shell 中没有这个入口，也可以使用服务端 curl bootstrap：
+
+```sh
+curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh -s -- uninstall
+```
+
+Release 也会附带同版本 `uninstall-server.sh` 和 `SHA256SUMS`，便于固定版本应急卸载。正常情况优先使用安装后的 `/usr/local/sbin/rsshub-cookie-sync-uninstall`，它与当前安装的服务端程序必然同版本。
+
+不要在 RSSHub 仍需要运行时删除 Compose 或 secret 文件。
+
+卸载会停用同步器 timer，移除同步器程序、systemd 单元和配置，同时删除候选 Cookie 和 `/var/lib/rsshub-cookie-sync` 状态；只删除确认由本项目创建的 `rsshub-sync` 账号。如果安装前已经存在同名账号，卸载只移除本项目添加的 SSH 授权和相关配置，不删除账号本身。不会把 secret 写回 Compose，也不会删除当前 `rsshub.env`、RSSHub 容器、volume 或 Redis。这样 RSSHub 会继续使用最后一次 live 配置运行。确认以后不再需要 RSSHub 使用这些 secret 后，再由管理员手工清理 `rsshub.env`。
+
+完整卸载请遵循“服务端 → Edge → Mac”：先完成本节服务端卸载，再在 `edge://extensions` 移除扩展，最后在 Mac 使用安装后的固定卸载入口或 macOS bootstrap。服务端删除候选 Cookie 和 `/var/lib/rsshub-cookie-sync` 状态，只保留 Compose、运行中的 RSSHub 和 live `rsshub.env`；Mac 默认保留 `~/.ssh/rsshub-cookie-sync` 及其 `.pub`。
 
 ## 常见问题
 
@@ -197,7 +209,7 @@ sudo /usr/local/sbin/rsshub-cookie-sync-uninstall
 
 ### SSH 无法连接
 
-检查 Mac 扩展“连接设置”中的服务器地址、端口、密钥文件名，检查服务器上的公钥是否对应所选密钥，并确认 `~/.ssh/known_hosts` 中的 Ed25519 指纹已通过可信渠道核对。不要关闭主机密钥校验。
+检查 Mac 扩展“连接设置”中的服务器地址、端口、密钥文件名，检查服务器上的公钥是否对应所选密钥，并确认 `~/.ssh/known_hosts` 中与该地址和端口匹配的主机指纹已通过可信渠道核对。普通或哈希记录、非 22 端口，以及 OpenSSH 支持的 RSA、ECDSA 或 Ed25519 主机密钥都可以使用。不要关闭主机密钥校验。
 
 ## 相关说明
 

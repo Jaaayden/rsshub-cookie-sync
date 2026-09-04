@@ -150,12 +150,49 @@ class NativeHostTests(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", argv)
         self.assertIn("GlobalKnownHostsFile=/dev/null", argv)
         self.assertIn("UpdateHostKeys=no", argv)
-        self.assertIn("HostKeyAlgorithms=ssh-ed25519", argv)
+        self.assertNotIn("HostKeyAlgorithms=ssh-ed25519", argv)
         self.assertIn("ControlMaster=no", argv)
         self.assertIn("ControlPath=none", argv)
         self.assertEqual(argv[-1], f"rsshub-sync@{self.server_host}")
         self.assertNotIn("z_c0=super-secret", argv)
         self.assertFalse(any(item.startswith("ProxyCommand=") for item in argv))
+
+    def test_ssh_leaves_known_hosts_format_and_host_key_algorithm_to_openssh(self) -> None:
+        # Native Host only validates the trust-store file boundary.  It must
+        # not parse host patterns itself: OpenSSH is responsible for ordinary
+        # and hashed records, non-default ports, and modern host-key types.
+        self.known_hosts.write_text(
+            "|1|hashed-host|hashed-host-key ecdsa-sha2-nistp256 AAAA\n",
+            encoding="ascii",
+        )
+        os.chmod(self.known_hosts, 0o600)
+        config = native_host.HostConfig(
+            server_host=self.server_host,
+            server_port=22022,
+            identity_file=self.identity,
+            known_hosts_file=self.known_hosts,
+        )
+        runner = mock.Mock(
+            return_value=CompletedProcess(
+                args=[], returncode=0, stdout=b'{"status":"unchanged"}', stderr=b""
+            )
+        )
+
+        self.assertEqual(
+            native_host.send_to_server(
+                {"zhihu": {"cookieHeader": "a=1"}}, config, runner=runner
+            ),
+            "unchanged",
+        )
+        argv = runner.call_args.args[0]
+        self.assertIn("StrictHostKeyChecking=yes", argv)
+        self.assertIn(
+            f'UserKnownHostsFile="{self.known_hosts}"',
+            argv,
+        )
+        self.assertIn("-p", argv)
+        self.assertIn("22022", argv)
+        self.assertNotIn("HostKeyAlgorithms=ssh-ed25519", argv)
 
     def test_ssh_argv_rejects_non_default_server_user_even_for_manual_host_config(self) -> None:
         config = native_host.HostConfig(
@@ -481,10 +518,19 @@ class NativeHostTests(unittest.TestCase):
                 "identityName": self.identity.name,
             }
         ).encode()
-        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
-            response = native_host.process_control_request(request, config_path)
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent), mock.patch.object(
+            native_host, "DEFAULT_KNOWN_HOSTS_FILE", self.known_hosts
+        ):
+            with mock.patch.object(
+                native_host,
+                "DEFAULT_KNOWN_HOSTS_FILE",
+                self.identity.parent / "known_hosts",
+            ):
+                response = native_host.process_control_request(request, config_path)
         self.assertEqual(response["status"], "config_saved")
-        self.assertEqual(native_host.load_config(config_path).server_user, "rsshub-sync")
+        saved = native_host.load_config(config_path)
+        self.assertEqual(saved.server_user, "rsshub-sync")
+        self.assertEqual(saved.known_hosts_file, self.identity.parent / "known_hosts")
 
     def test_control_requests_are_strict_and_have_no_ssh_side_effect(self) -> None:
         config_path = Path(self.temp_dir.name) / "Application Support" / "RSSHub Cookie Sync" / "config.json"
@@ -505,7 +551,9 @@ class NativeHostTests(unittest.TestCase):
         )
         config_path.chmod(0o600)
         runner = mock.Mock()
-        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent):
+        with mock.patch.object(native_host, "DEFAULT_SSH_DIR", self.identity.parent), mock.patch.object(
+            native_host, "DEFAULT_KNOWN_HOSTS_FILE", self.known_hosts
+        ):
             get_response = native_host.process_control_request(
                 b'{"version":1,"action":"get-config"}', config_path
             )

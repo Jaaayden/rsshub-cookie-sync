@@ -43,6 +43,7 @@
             <option value="rsshub-cookie-sync">rsshub-cookie-sync（默认）</option>
           </select>
           <small>这里只显示 <code>~/.ssh/</code> 下带有配对 <code>.pub</code> 文件的 Ed25519 私钥。选择私钥不会自动授权，必须先把对应公钥安装到服务器的 <code>rsshub-sync</code> 账号。私钥始终由本机 Native Host 使用，扩展无法读取它。</small>
+          <small id="identity-warning" class="risk" role="status" hidden>当前选择的不是项目专用密钥。它可能也被用于登录 root 或其他服务器；推荐先运行 Native Host 安装器准备 <code>~/.ssh/rsshub-cookie-sync</code>，完成公钥授权后再切换。</small>
         </label>
 
         <div class="actions">

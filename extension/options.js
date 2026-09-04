@@ -10,6 +10,7 @@ const form = document.querySelector('#settings-form');
 const hostElement = document.querySelector('#server-host');
 const portElement = document.querySelector('#server-port');
 const identityElement = document.querySelector('#identity-name');
+const identityWarningElement = document.querySelector('#identity-warning');
 const refreshButton = document.querySelector('#refresh');
 const saveButton = document.querySelector('#save');
 const cancelButton = document.querySelector('#cancel');
@@ -46,6 +47,12 @@ function setFormConfig(config) {
   hostElement.value = config.host;
   portElement.value = String(config.port);
   identityElement.value = config.identityName;
+  updateIdentityWarning();
+}
+
+function updateIdentityWarning() {
+  identityWarningElement.hidden =
+    identityElement.value === NATIVE_CONFIG_DEFAULTS.identityName;
 }
 
 function renderIdentities(identities, selectedName) {
@@ -70,6 +77,7 @@ function renderIdentities(identities, selectedName) {
     identityElement.prepend(option);
   }
   identityElement.value = selectedName;
+  updateIdentityWarning();
 }
 
 function formConfig() {
@@ -138,6 +146,8 @@ form.addEventListener('submit', async (event) => {
 refreshButton.addEventListener('click', () => {
   void loadConfig();
 });
+
+identityElement.addEventListener('change', updateIdentityWarning);
 
 cancelButton.addEventListener('click', () => {
   window.close();

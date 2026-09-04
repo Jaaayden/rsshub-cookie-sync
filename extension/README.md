@@ -29,7 +29,7 @@ git clone https://github.com/Jaaayden/rsshub-cookie-sync.git ~/rsshub-cookie-syn
 3. 确认已经按 [Native Host 说明](../native-host/README.md) 安装本机桥接程序，并在扩展“连接设置”中填写服务器地址、端口和 SSH 密钥文件名。
 4. 点击“立即同步”。
 
-> 重要：选择 `id_ed25519` 只会选择本机私钥，不会自动授权。对应的 `~/.ssh/id_ed25519.pub` 必须先通过管理员 SSH 连接安装到服务器的 `rsshub-sync` 账号；扩展日常连接使用的不是 `root`。
+> 重要：普通安装应选择项目专用的 `rsshub-cookie-sync` 私钥，不会回退到 `id_ed25519` 等通用登录密钥。选择私钥不会自动授权；对应的 `~/.ssh/rsshub-cookie-sync.pub` 必须先通过管理员 SSH 连接安装到服务器的 `rsshub-sync` 账号。扩展日常连接使用的不是 `root`。
 
 扩展只读取以下两个请求 URL 适用的 Cookie：
 
@@ -75,22 +75,22 @@ https://m.weibo.cn/feed/group
 
 - “服务器地址”：填写运行 RSSHub 的域名或 IPv4 地址；
 - “SSH 端口”：通常为 `22`；
-- “SSH 密钥文件名”：选择 `~/.ssh/` 下已有的密钥。
+- “SSH 密钥文件名”：普通安装选择 `~/.ssh/rsshub-cookie-sync`，并确认它与服务器上的公钥是一对。
 - “SSH 用户名”：只读显示为 `rsshub-sync`；它不可修改，也不是 `root`。
 
 点击“保存连接设置”后，设置写入本机 Native Host 的 `config.json`，不会写入扩展存储。扩展只接触文件名，Native Host 只把选中的路径交给本机系统 SSH；私钥内容不会进入扩展。服务器端账号由安装器创建为 `rsshub-sync`，不需要在这里填写。
 
-如果刚安装 Host，默认密钥名是 `rsshub-cookie-sync`。你也可以复用 `~/.ssh/` 下已有的 Ed25519 私钥，前提是权限为 `0600` 或更严格、旁边存在配对的 `.pub`，并且已把该公钥安装到服务器 `rsshub-sync` 账号。RSA、ECDSA 和缺少 `.pub` 的私钥不会出现在列表中。仅在下拉框中选择已有私钥不会完成授权。连接设置页会在保存后显示结果；“重新读取设置”可以再次从 Native Host 读取确认。
+如果刚安装 Host，默认密钥名是 `rsshub-cookie-sync`；安装器只会创建或复用这一把项目专用密钥，不会自动采用 `id_ed25519` 等通用密钥。私钥旁边必须存在配对的 `.pub`，权限为 `0600` 或更严格，并且该公钥已经安装到服务器 `rsshub-sync` 账号。RSA、ECDSA 和缺少 `.pub` 的私钥不会出现在列表中。仅在下拉框中选择已有私钥不会完成授权。连接设置页会在保存后显示结果；“重新读取设置”可以再次从 Native Host 读取确认。
 
-公钥授权使用管理员账号完成，例如：
+扩展允许高级用户手动选择 `~/.ssh/` 下其他已有的 Ed25519 私钥作为兼容入口，但安装器不会为这类密钥创建、替换或自动迁移配置。只有在确认该密钥没有同时用于 `root` 或其他服务器时才应使用；共享通用密钥会扩大 Cookie 同步链路泄露后的影响范围。
 
-```sh
-ssh -p <管理员SSH端口> root@<服务器地址> \
-  /usr/local/sbin/rsshub-cookie-sync-provision-key \
-  < ~/.ssh/id_ed25519.pub
-```
+公钥授权
 
-这个命令只通过标准输入发送公钥，不会发送私钥。`provision-key` 每次会替换服务器上旧的同步公钥；更换后仍使用旧私钥的设备会无法连接。确认公钥已授权后，再选择对应私钥并点击“立即同步”。
+新手首次安装时不需要单独执行授权命令：先在 Mac 安装 Native Host 并复制公钥，再普通 SSH 登录服务器一次，在同一个 root shell 中运行服务端安装器，安装器要求粘贴公钥时直接粘贴即可。公钥只通过安装器标准输入传递，不会发送私钥。
+
+如果首次安装时跳过了公钥，或需要更换密钥，请按 [Native Host 的高级 SSH 说明](../docs/advanced-ssh.md)中的单独 provision 和迁移流程操作。`provision-key` 每次会替换服务器上旧的同步公钥；更换后仍使用旧私钥的设备会无法连接。
+
+如果 Native Host 提示发现旧版或通用密钥，请先按 [Native Host 的两阶段迁移说明](../native-host/README.md#旧版或通用密钥迁移) 执行 `--prepare-dedicated-key`、授权 `rsshub-cookie-sync.pub`，再执行 `--activate-dedicated-key`。普通重装不会静默替换旧密钥。
 
 ## 权限
 
@@ -123,11 +123,21 @@ retryable_error
 
 使用源码时，更新代码后在 `edge://extensions` 找到扩展并点击“重新加载”。使用 ZIP 时，下载新版本并加载新解压目录。只要 `manifest.json` 的固定 `key` 不变，扩展 ID 和 Native Host 授权不变。
 
-卸载扩展不会删除服务器上的 RSSHub、secret env、候选或状态。若不再需要本机桥接程序，再运行：
+卸载扩展不会删除服务器上的 RSSHub 或 live `rsshub.env`；服务端卸载会删除候选 Cookie 和 `/var/lib/rsshub-cookie-sync` 状态，并只删除确认由本项目创建的 `rsshub-sync` 账号。如果安装前已经存在同名账号，卸载只移除本项目添加的 SSH 授权和相关配置，不删除账号本身。完整顺序是“服务端 → Edge → Mac”：先卸载服务端，再在 `edge://extensions` 移除扩展，最后处理本机 Native Host。
+
+已通过安装器安装过 Native Host 时，使用安装后的固定入口：
 
 ```sh
-python3 native-host/uninstall.py
+"$HOME/Library/Application Support/rsshub-cookie-sync/uninstall.sh"
 ```
+
+如果固定入口不存在，也可以使用 macOS curl bootstrap：
+
+```sh
+curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh -s -- uninstall
+```
+
+两个入口都会默认保留 `~/.ssh/rsshub-cookie-sync`、对应 `.pub` 和 `~/.ssh/known_hosts`。如果是从源码目录安装、且固定入口不可用，才使用兼容命令 `python3 native-host/uninstall.py`；不要为卸载递归删除用户目录。服务端固定卸载命令、curl bootstrap 和 secret 保留边界见[项目总览](../README.md#卸载顺序)。
 
 ## 测试和打包
 
@@ -135,4 +145,4 @@ python3 native-host/uninstall.py
 npm test
 ```
 
-也可以在仓库根目录运行 `make check`。GitHub Actions 会在 Release 时生成 `rsshub-cookie-sync-extension.zip`；CI 不是安装前提。
+也可以在仓库根目录运行 `make check`。GitHub Actions 会在 Release 时生成 `rsshub-cookie-sync-extension.zip`、macOS 一键安装脚本 `install-macos.sh` 和服务端一键安装脚本 `install-server.sh`；CI 不是安装前提。

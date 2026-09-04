@@ -18,31 +18,43 @@ Edge 扩展 → 本机 Native Host → SSH → RSSHub 服务器
 
 ## 最简单的安装方式
 
-下面的流程适合刚安装 RSSHub 的用户。普通情况下不需要填写 Compose project、Docker service、RSSHub 地址，也不需要手动编辑 Compose 文件。
+下面是给新手的完整顺序。普通情况下不需要填写 Compose project、Docker service 或 RSSHub 地址，也不需要手动编辑 Compose 文件。
 
-### 第一步：在 RSSHub 服务器上安装服务端
+### 第一步：在 Mac 安装本机桥接程序并复制公钥
 
-以 root 登录 RSSHub 服务器，执行这一条命令：
+在 Mac 终端以当前普通用户执行本机一键安装：
 
-> 如果这是你第一次通过网络 SSH 连接这台服务器，请先通过云厂商控制台等独立可信渠道核对 SSH 主机指纹，不要直接接受一个未经确认的新 key。已经安全安装好 RSSHub、且 `known_hosts` 中条目正确的用户可直接继续。
+```sh
+curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh
+```
+
+安装器不需要服务器参数，也不会创建项目源码目录。全新安装只会在 `~/.ssh/rsshub-cookie-sync` 创建项目专用 Ed25519 密钥；如果这个文件已经存在，就只复用这一把精确的项目密钥。它不会回退到 `id_ed25519` 或其他通用登录密钥，也不会覆盖通用密钥。
+
+安装器会把状态写到终端错误输出，并将一行公钥作为最后的标准输出。复制这一整行，稍后粘贴到服务端安装器；复制的是 `.pub` 公钥，不是私钥。不要运行单独的 `provision-key` 命令。扩展日常连接使用固定的受限账号 `rsshub-sync`，不是 `root`。如果你要从源码安装或调试，见 [Native Host 说明](native-host/README.md)。
+
+### 第二步：普通 SSH 登录一次，并在同一个 root 会话安装服务端
+
+从 Mac 执行一次普通 SSH 登录：
+
+```sh
+ssh -p <服务器SSH端口> root@<服务器地址>
+```
+
+首次连接时 SSH 会显示主机指纹并询问是否继续。确认这是你要连接的服务器后输入 `yes`，让 SSH 将主机条目保存到 `~/.ssh/known_hosts`。本流程不需要手动运行 `ssh-keyscan`、编辑 `known_hosts` 或准备临时文件；如果你需要独立核对指纹，见[高级 SSH 说明](docs/advanced-ssh.md)。
+
+保持这个 root shell 不要退出，在同一个会话中执行：
 
 ```sh
 curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh
 ```
 
-安装器会下载最新稳定版本，然后打开一个交互式安装流程：
+服务端安装器会自动查找常见位置的 Compose 文件；普通官方布局直接确认即可。它默认使用 `rsshub` service 和 `http://127.0.0.1:1200`，并让 Docker Compose 自动解析 project 名称。安装过程中会要求粘贴第一步复制的那一整行公钥，也可以配置 Bark。服务端会在这一步自动创建 `rsshub-sync` 受限账号并安装公钥，不需要另开终端或单独执行授权命令。
 
-1. 自动查找常见位置的 `docker-compose.yml`，例如当前目录、`/opt/rsshub` 和 `/root/rsshub`；找到后会先让你确认。
-2. 默认使用官方 Compose 常见的 `rsshub` 服务名；如果你的文件使用了其他服务名，安装器会列出服务并让你选择。
-3. 让 Docker Compose 自己解析 project 名称，不要求你学习这个概念。
-4. RSSHub 健康地址自动使用 `http://127.0.0.1:1200`；官方安装通常不需要额外设置。
-5. 询问是否配置 Bark，以及是否现在粘贴本机 Native Host 的公钥。暂时没有公钥时可以跳过，之后再执行。
+如果 Compose 文件不在常见位置，安装器会在交互提示中要求输入绝对路径。它不会下载或更新 RSSHub 镜像，也不会连接你的 Mac。
 
-如果服务器上的 Compose 不在这些位置，安装器会提示你输入绝对路径。安装器只在服务器本机工作，不会连接你的 Mac，也不会下载或更新 RSSHub 镜像。
+### 第三步：安装 Edge 扩展
 
-### 第二步：安装 Edge 扩展
-
-在 Mac 上打开 [GitHub Releases](https://github.com/Jaaayden/rsshub-cookie-sync/releases)，下载 `rsshub-cookie-sync-extension.zip`，解压到一个固定目录。
+回到 Mac，打开 [GitHub Releases](https://github.com/Jaaayden/rsshub-cookie-sync/releases)，下载 `rsshub-cookie-sync-extension.zip`，解压到固定目录。
 
 在 Edge 中：
 
@@ -53,107 +65,26 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 扩展使用固定的公开 ID。只要没有修改 `manifest.json` 中的 `key`，升级扩展时 ID 不会变化。
 
-### 第三步：安装本机桥接程序
-
-在 Mac 终端执行：
+Release 同时提供 `SHA256SUMS`。如果你下载了扩展 ZIP 和该校验文件，可在同一目录执行：
 
 ```sh
-git clone https://github.com/Jaaayden/rsshub-cookie-sync.git ~/rsshub-cookie-sync
-cd ~/rsshub-cookie-sync
-python3 native-host/install.py
+grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 ```
 
-安装器不需要服务器地址参数。它会：
+输出 `OK` 才表示下载文件与 Release 中的校验值一致。
 
-- 安装 Edge Native Messaging Host；
-- 默认在 `~/.ssh/rsshub-cookie-sync` 创建 Ed25519 密钥；如果该文件已经存在，就复用它；
-- 使用 `~/.ssh/known_hosts` 保存 SSH 主机密钥；
-- 输出一行公钥，供服务器安装。
+### 第四步：确认 Native Host、填写连接设置并同步
 
-私钥不会进入扩展。扩展设置页只列出 `~/.ssh/` 下带有配对 `.pub` 的 Ed25519 密钥文件名，Native Host 只把选中的路径交给本机系统 SSH。RSA、ECDSA 或缺少 `.pub` 的私钥不会出现在列表中，因为服务端授权入口只接受 Ed25519。复用已有密钥时，先执行 `chmod 600 ~/.ssh/<密钥文件名>`，并确认它能在无人值守状态下使用；带口令且依赖人工输入的私钥不适合定时同步。
-
-### 第四步：核对服务器主机密钥
-
-如果你已经用 SSH 安全连接过这台服务器，并且 `~/.ssh/known_hosts` 中已有正确条目，可以跳过本步。
-
-全新连接时，不能把网络上第一次看到的主机密钥直接当作可信密钥。请让服务器管理员在服务器控制台执行：
-
-```sh
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
-```
-
-在 Mac 上获取同一地址的公开条目并计算指纹：
-
-```sh
-ssh-keyscan -t ed25519 -p <SSH端口> <服务器地址> > /tmp/rsshub-cookie-sync-known_hosts
-ssh-keygen -lf /tmp/rsshub-cookie-sync-known_hosts -E sha256
-```
-
-只有两个指纹通过独立可信渠道完全一致时，才把公开条目加入本机文件：
-
-```sh
-cat /tmp/rsshub-cookie-sync-known_hosts >> ~/.ssh/known_hosts
-chmod 600 ~/.ssh/known_hosts
-```
-
-更完整的主机密钥说明见 [高级 SSH 说明](docs/advanced-ssh.md)。
-
-### 第五步：把公钥交给服务器
-
-这里有两个不同的 SSH 身份，请不要混用：
-
-- `root`（或你自己的管理员账号）：只用于首次安装服务端和执行一次公钥授权命令；
-- `rsshub-sync`：扩展日常同步实际使用的固定受限账号。它没有普通 shell，也不是 root。
-
-所以扩展设置页把“SSH 用户名”显示为只读：用户名已经固定为 `rsshub-sync`，不能填 `root`。在扩展里选择 `id_ed25519` 只表示“使用本机这个私钥”，不会自动把它授权到服务器；对应的 `id_ed25519.pub` 必须先安装到服务器的 `rsshub-sync` 账号。
-
-完成上一步的指纹核对后，Native Host 安装器输出的是公钥，不是私钥。使用已经核对过主机身份的管理员 SSH 连接，把公钥通过标准输入交给服务器：
-
-如果你选择的是 `id_ed25519`，先确认本机私钥权限，并查看对应公钥指纹：
-
-```sh
-chmod 600 ~/.ssh/id_ed25519
-ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
-```
-
-如果没有 `.pub` 文件，可以只在本机从私钥派生配对公钥（不会上传私钥）。把它放回同名位置后，扩展才能识别这把 Ed25519 私钥：
-
-```sh
-ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
-chmod 644 ~/.ssh/id_ed25519.pub
-ssh-keygen -lf ~/.ssh/id_ed25519.pub -E sha256
-```
-
-确认指纹无误后，再执行授权：
-
-```sh
-ssh -p <管理员SSH端口> root@<服务器地址> \
-  /usr/local/sbin/rsshub-cookie-sync-provision-key \
-  < ~/.ssh/rsshub-cookie-sync.pub
-```
-
-如果你复用了 `id_ed25519`，把最后的路径换成 `~/.ssh/id_ed25519.pub`。命令中不会出现公钥内容；私钥永远不离开 Mac。也可以在服务器安装器询问时，直接粘贴公钥的一整行。
-
-每台服务器只保留一个同步公钥。再次执行 `provision-key` 会替换旧公钥，而不是追加；替换后，仍使用旧私钥的设备会立即无法同步。只有在确认要更换采集设备或密钥时才重新 provision，并随后在扩展中选择同一对私钥。
-
-### 第六步：在扩展中填写连接信息
-
-打开扩展弹窗，点击“连接设置”：
+打开扩展，进入“连接设置”，点击“重新读取设置”。这个按钮会通过 Native Host 读取本机连接配置；能够成功显示设置，才表示 Native Host 已安装且可用。弹窗里的“刷新扩展状态”不是 Host 检查：它只重新读取后台已经保存的本地脱敏状态，不调用 Native Host、不读取 Cookie，也不会上传或启动 SSH。
 
 - “服务器地址”：填写运行 RSSHub 的域名或 IPv4 地址；
 - “SSH 端口”：通常是 `22`；
-- “SSH 密钥文件名”：选择 `~/.ssh/` 中与服务器公钥对应的密钥。
-- “SSH 用户名”：无需填写，固定为服务端的 `rsshub-sync`；不要改成 `root`。
+- “SSH 密钥文件名”：选择 `rsshub-cookie-sync`；它必须与刚才粘贴并授权的 `.pub` 是一对；
+- “SSH 用户名”：只读显示为 `rsshub-sync`，不能改成 `root`。
 
-点击“保存连接设置”。这些连接信息保存在本机 Native Host，不写入扩展存储；私钥内容不会被扩展读取或上传。服务器端账号由安装器创建为 `rsshub-sync`，不需要另外填写。
+点击“保存连接设置”。再在同一个 Edge Default Profile 登录 `https://www.zhihu.com` 和 `https://m.weibo.cn`，点击“授权站点权限”，最后点击“立即同步”。如果弹窗显示刚才的旧结果，再点一次“刷新扩展状态”；重新读取网站登录态则使用“立即同步”。
 
-### 第七步：授权并同步
-
-1. 在 Edge Default Profile 登录 `https://www.zhihu.com` 和 `https://m.weibo.cn`。
-2. 在扩展中点击“授权站点权限”，只允许知乎和微博的精确站点权限。
-3. 点击“立即同步”。
-
-第一次同步时，服务器会分别验证两个 Cookie。有效 Cookie 会保存为候选；全新 RSSHub 会在安全事务完成后使用它。某一个 provider 失败不会清空另一个 provider。
+扩展设置页允许高级用户手动选择其他已有的 Ed25519，但安装器不会为它们创建或自动迁移配置。只有确认该密钥没有同时用于 `root` 或其他服务器时才应使用；普通安装始终使用项目专用的 `rsshub-cookie-sync`。
 
 ## 哪些内容会配置，哪些不会写死
 
@@ -218,11 +149,36 @@ env_file:
 
 ### 同一台服务器再次安装
 
-再次运行同一条一键命令即可。安装器会识别已经迁移的实例，自动复用原来的 project、service 和非默认本机健康端口，并保留当前 Cookie、候选、Bark、状态和受限 SSH 账号；不会因为“重新安装”而无条件重建 RSSHub。
+同一台服务器的普通重装或升级，优先在 Mac 再次运行本机一键 bootstrap：
+
+```sh
+curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh
+```
+
+安装器会复用配置中这把精确的项目专用密钥，不生成新密钥、不改写服务器地址和主机信任文件，也不会因为“重新安装”而无条件重建 RSSHub。它会在替换本机 Host、启动器或配置前完成校验；校验失败时会保留原安装。只有从源码目录安装或进行调试时，才按 [Native Host 说明](native-host/README.md) 使用源码兼容命令。
+
+如果旧版配置使用了 `id_ed25519` 或其他旧版/通用密钥，普通重装会明确停止并且不写配置。请使用下面的两阶段迁移：
+
+```sh
+# 阶段 1：只创建/检查项目专用密钥，不改当前 Native Host 配置
+python3 native-host/install.py --prepare-dedicated-key
+
+# 使用管理员 SSH，把上一步生成的公钥授权给服务器 rsshub-sync
+ssh -p <管理员SSH端口> root@<服务器地址> \
+  /usr/local/sbin/rsshub-cookie-sync-provision-key \
+  < ~/.ssh/rsshub-cookie-sync.pub
+
+# 阶段 2：明确激活专用密钥；会保留旧配置中的服务器地址和端口
+python3 native-host/install.py --activate-dedicated-key
+```
+
+授权完成后，第二阶段会先用不含 Cookie 的空请求做一次 SSH 认证探测；只有专用公钥和 `known_hosts` 都通过，才会切换本机配置。然后在扩展“连接设置”选择 `rsshub-cookie-sync` 并保存，再点击“立即同步”。如果探测失败，本机旧配置和已安装文件仍保持不变。
+
+注意：服务器一次只保留一个同步公钥，执行 provision 后旧私钥会立即失去 `rsshub-sync` 访问权，因此应紧接着执行激活命令。如果激活失败，需要用管理员连接重新 provision 旧公钥，才能恢复旧连接。
 
 不要把 Cookie 手动写回 `docker-compose.yml`，也不要删除 `secrets/rsshub.env` 来“重置”。
 
-如果以后要卸载服务端，运行 `sudo /usr/local/sbin/rsshub-cookie-sync-uninstall`。它会停用同步器，但保留最后一次 live secret env，让 RSSHub 继续静态运行；完整边界见 [服务端卸载说明](server/README.md#卸载)。
+如果以后要卸载服务端，运行 `sudo /usr/local/sbin/rsshub-cookie-sync-uninstall`。它会停用同步器并删除候选 Cookie 和状态，只保留最后一次 live secret env，让 RSSHub 继续静态运行；完整边界见 [服务端卸载说明](server/README.md#卸载)。
 
 ### 换 Compose 路径或非官方布局
 
@@ -233,7 +189,45 @@ env_file:
 
 ### 换服务器
 
-在新服务器重新运行一键安装器；在 Mac 的扩展“连接设置”中换成新地址和端口，选择对应密钥；核对新服务器的 Ed25519 主机指纹，并把本机公钥重新 provision。扩展 ID 不需要改变。
+在新服务器重新运行一键安装器；先从 Mac 普通 SSH 登录一次接受主机提示，再在同一个 root shell 中运行服务端安装器并粘贴项目公钥。然后在 Mac 的扩展“连接设置”中换成新地址和端口，选择 `rsshub-cookie-sync`。扩展 ID 不需要改变；需要单独更换已部署公钥时再参阅高级 SSH 说明。
+
+## 卸载顺序
+
+请按“服务端 → Edge → Mac”的顺序卸载，避免服务端仍在运行而本机采集链路已经消失：
+
+1. 先在服务器执行服务端卸载。已有 root shell 可直接运行：
+
+   ```sh
+   /usr/local/sbin/rsshub-cookie-sync-uninstall
+   ```
+
+   也可以使用服务端 curl bootstrap：
+
+   ```sh
+   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh -s -- uninstall
+   ```
+
+   Release 中的 `uninstall-server.sh` 是同版本的独立备用入口；正常情况优先用已安装的固定命令，因为它必然与当前安装版本一致。
+
+   服务端卸载只停用同步器、删除其程序、候选 Cookie 和 `/var/lib/rsshub-cookie-sync` 状态；只删除确认由本项目创建的 `rsshub-sync` 账号。如果安装前已经存在同名账号，卸载只移除本项目添加的 SSH 授权和相关配置，不删除账号本身。默认只保留 Compose、仍在运行的 RSSHub 和 `secrets/rsshub.env`，不会把 secret 写回 Compose。确认以后不再需要 RSSHub 使用这些 secret 后，再由管理员手工清理。
+
+2. 再在 Edge 打开 `edge://extensions`，找到 RSSHub Cookie Sync，点击“移除”。这只删除浏览器扩展及其本地扩展数据，不会删除服务器文件。
+
+3. 最后在 Mac 执行本机卸载。已通过安装器安装过 Native Host 时，优先使用安装后固定入口：
+
+   ```sh
+   "$HOME/Library/Application Support/rsshub-cookie-sync/uninstall.sh"
+   ```
+
+   如果固定入口不存在，也可以使用 macOS curl bootstrap：
+
+   ```sh
+   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh -s -- uninstall
+   ```
+
+   Release 中的 `uninstall-macos.sh` 也可独立下载执行；它只调用安装时写入的版本匹配卸载程序。
+
+   本机卸载删除 Native Host、Edge manifest 和 Native Host 配置，但默认保留 `~/.ssh/rsshub-cookie-sync`、对应 `.pub` 和 `~/.ssh/known_hosts`。源码安装用户的兼容卸载命令见 [Native Host 说明](native-host/README.md)；不要为卸载递归删除用户目录。
 
 ## 查看状态和常见问题
 
@@ -248,7 +242,7 @@ env_file:
 
 - 弹窗显示旧状态：点击“刷新扩展状态”；如果要重新采集登录态，再点击“立即同步”。
 - `需授权`：点击“授权站点权限”，并确认登录的是 Edge Default Profile。
-- Native Host 不可用：确认已经运行 `python3 native-host/install.py`，然后在 `edge://extensions` 重新加载扩展。
+- Native Host 不可用：在 Mac 重新运行 `curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh`，然后在 `edge://extensions` 重新加载扩展；只有源码安装或调试时才使用 [Native Host 说明](native-host/README.md) 中的源码兼容命令。
 - SSH 连接失败：检查扩展“连接设置”、`~/.ssh/known_hosts` 指纹以及服务器上的公钥是否对应；不要关闭主机密钥校验。
 - `候选被拒绝`：先在 Edge 重新登录对应网站，再点击“立即同步”。
 - 没有 Bark：服务端安装时可以跳过，之后按 [服务端说明](server/README.md) 配置并运行 `notify-test`。
@@ -268,7 +262,7 @@ Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 D
 
 ## 开发、测试和打包
 
-CI 不是安装前提。GitHub Actions 会运行测试并在版本 Release 中生成可直接加载的扩展 ZIP 和一键服务端安装脚本。
+CI 不是安装前提。GitHub Actions 会运行测试，并在版本 Release 中生成可直接加载的扩展 ZIP、macOS/服务端一键安装脚本、两端独立卸载入口以及 `SHA256SUMS`。安装器写入的固定卸载程序与它所安装的版本一致；Release 中的 `uninstall-macos.sh` 和 `uninstall-server.sh` 用于独立下载或应急清理。
 
 ```sh
 make check

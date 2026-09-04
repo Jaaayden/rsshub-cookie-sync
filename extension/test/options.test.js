@@ -16,6 +16,8 @@ test('连接设置页已注册为 Manifest options_ui，并包含刷新/保存�
   assert.match(html, /id="server-user"[^>]*value="rsshub-sync"[^>]*readonly/);
   assert.match(html, /选择私钥不会自动授权/);
   assert.match(html, /Ed25519/);
+  assert.match(html, /id="identity-warning"/);
+  assert.match(html, /登录 root 或其他服务器/);
 });
 
 test('连接设置页刷新和加载只走脱敏控制消息，不读取 Cookie 或扩展存储', async () => {
@@ -26,6 +28,7 @@ test('连接设置页刷新和加载只走脱敏控制消息，不读取 Cookie 
   assert.doesNotMatch(source, /createSetNativeConfigMessage\(config\)\.config/);
   assert.doesNotMatch(source, /chrome\.cookies|chrome\.storage|cookies\.getAll|storage\.local/);
   assert.match(html, /重新读取设置/);
+  assert.match(source, /identityElement\.addEventListener\('change', updateIdentityWarning\)/);
 });
 
 test('Popup 提供连接设置入口', async () => {

@@ -5,6 +5,7 @@ set -eu
 #
 # Intended usage:
 #   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh
+#   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh -s -- uninstall
 #
 # The bootstrap installs only the latest stable GitHub release.  It never
 # silently falls back to the mutable main branch.  The downloaded installer
@@ -80,4 +81,13 @@ tar -xzf "$ARCHIVE_FILE" --no-same-owner --no-same-permissions -C "$TEMP_DIR" \
 INSTALLER=$(find "$TEMP_DIR" -type f -path '*/server/install.sh' -print -quit)
 [ -n "$INSTALLER" ] || die "下载内容缺少 server/install.sh"
 chmod 0755 "$INSTALLER"
-sh "$INSTALLER"
+if [ "${1:-}" = uninstall ]; then
+    shift
+    UNINSTALLER=$(find "$TEMP_DIR" -type f -path '*/server/uninstall.sh' -print -quit)
+    [ -n "$UNINSTALLER" ] || die "下载内容缺少 server/uninstall.sh"
+    chmod 0755 "$UNINSTALLER"
+    sh "$UNINSTALLER" "$@"
+else
+    [ "$#" -eq 0 ] || die "未知参数：$1（卸载请使用 uninstall）"
+    sh "$INSTALLER"
+fi

@@ -112,6 +112,8 @@ class FakeTransport:
         self.requests = []
         self.zhihu_old_auth_failures = 0
         self.zhihu_post_fail = False
+        self.weibo_old_auth_failures = 0
+        self.weibo_auth_failure_limit = 0
         self.weibo_transient = False
 
     def request(self, url, method="GET", headers=None, body=None, timeout=20):
@@ -137,6 +139,13 @@ class FakeTransport:
         if path == "/api/config":
             if self.weibo_transient:
                 return HTTPResponse(429, b"{}")
+            if (
+                self.weibo_auth_failure_limit
+                and "SUB=new" not in cookie
+            ):
+                self.weibo_old_auth_failures += 1
+                if self.weibo_old_auth_failures <= self.weibo_auth_failure_limit:
+                    return HTTPResponse(401, b"{}")
             return HTTPResponse(200, b'{"ok":1,"data":{"login":true,"uid":"123"}}')
         raise AssertionError("unexpected URL")
 
@@ -673,6 +682,62 @@ class ServerTests(unittest.TestCase):
         self.assertIn(("recreate",), self.docker.calls)
         self.assertTrue(any("自动更新" in title for title, _ in self.notifier.events))
 
+    def test_monitor_promotes_weibo_after_two_auth_failures(self):
+        # Keep Zhihu healthy so this exercises the Weibo threshold and does
+        # not depend on the other provider's state machine.
+        self.transport.zhihu_old_auth_failures = 2
+        self.transport.weibo_auth_failure_limit = 2
+        self.service._save_candidate("weibo", WB_NEW)
+        state = load_state(self.config.state_file)
+        state["providers"]["weibo"]["candidate_hash"] = sha256_prefix(WB_NEW)
+        state["providers"]["weibo"]["candidate_validation"] = "ok"
+        state["providers"]["weibo"]["candidate_received_at"] = self.clock.now()
+        state["providers"]["weibo"]["candidate_validated_at"] = self.clock.now()
+        save_state(self.config.state_file, state)
+
+        self.service.monitor()
+        self.service.monitor()
+
+        values = dict(line.split("=", 1) for line in self.live.read_text().splitlines())
+        self.assertEqual(values["WEIBO_COOKIES"], WB_NEW)
+        self.assertEqual(values["ZHIHU_COOKIES"], ZH_OLD)
+        self.assertFalse((self.config.candidate_dir / "weibo.cookie").exists())
+        self.assertEqual(self.docker.calls.count(("recreate",)), 1)
+        item = load_state(self.config.state_file)["providers"]["weibo"]
+        self.assertEqual(item["last_probe"], "ok")
+        self.assertEqual(item["auth_failures"], 0)
+
+    def test_provider_state_is_independent_when_zhihu_promotes_and_weibo_is_transient(self):
+        # Both providers have verified candidates.  Zhihu reaches its
+        # two-failure threshold while Weibo remains temporarily unavailable;
+        # only Zhihu may be promoted and the Weibo candidate must stay queued.
+        self.transport.zhihu_old_auth_failures = 0
+        self.transport.weibo_transient = True
+        self.service._save_candidate("zhihu", ZH_NEW)
+        self.service._save_candidate("weibo", WB_NEW)
+        state = load_state(self.config.state_file)
+        for provider, cookie in (("zhihu", ZH_NEW), ("weibo", WB_NEW)):
+            item = state["providers"][provider]
+            item["candidate_hash"] = sha256_prefix(cookie)
+            item["candidate_validation"] = "ok"
+            item["candidate_received_at"] = self.clock.now()
+            item["candidate_validated_at"] = self.clock.now()
+        save_state(self.config.state_file, state)
+
+        self.service.monitor()
+        self.service.monitor()
+
+        values = dict(line.split("=", 1) for line in self.live.read_text().splitlines())
+        self.assertEqual(values["ZHIHU_COOKIES"], ZH_NEW)
+        self.assertEqual(values["WEIBO_COOKIES"], WB_OLD)
+        self.assertFalse((self.config.candidate_dir / "zhihu.cookie").exists())
+        self.assertTrue((self.config.candidate_dir / "weibo.cookie").exists())
+        item = load_state(self.config.state_file)["providers"]["weibo"]
+        self.assertEqual(item["last_probe"], "transient")
+        self.assertEqual(item["transient_failures"], 2)
+        self.assertEqual(item["candidate_validation"], "ok")
+        self.assertEqual(self.docker.calls.count(("recreate",)), 1)
+
     def test_candidate_transient_probe_is_retried_and_later_promoted(self):
         self.service._save_candidate("zhihu", ZH_NEW)
         state = load_state(self.config.state_file)
@@ -878,6 +943,32 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(self.service.transaction_file.exists())
         values = dict(line.split("=", 1) for line in self.live.read_text().splitlines())
         self.assertEqual(values["ZHIHU_COOKIES"], ZH_OLD)
+
+    def test_unhealthy_recreate_rolls_back_live_env_and_cleans_transaction(self):
+        # The first health check belongs to the new container and fails.  The
+        # rollback check then succeeds, so a failed promotion must leave the
+        # old live file active without stale transaction artifacts.
+        health_checks = iter((False, True))
+
+        def wait_healthy():
+            self.docker.calls.append(("healthy",))
+            return next(health_checks)
+
+        self.service.docker.wait_healthy = wait_healthy
+
+        with self.assertRaises(SyncError):
+            self.service._promote(
+                {"zhihu": ZH_NEW},
+                load_state(self.config.state_file),
+                "unhealthy_recreate",
+            )
+
+        values = dict(line.split("=", 1) for line in self.live.read_text().splitlines())
+        self.assertEqual(values["ZHIHU_COOKIES"], ZH_OLD)
+        self.assertFalse(self.service.prev_env.exists())
+        self.assertFalse(self.service.transaction_file.exists())
+        self.assertEqual(self.docker.calls.count(("recreate",)), 2)
+        self.assertEqual(self.docker.calls.count(("healthy",)), 2)
 
     def test_recover_transaction_removes_orphan_backup_without_marker(self):
         atomic_write(self.service.prev_env, b"ZHIHU_COOKIES=orphan\n")
