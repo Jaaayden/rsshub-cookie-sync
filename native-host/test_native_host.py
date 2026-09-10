@@ -54,10 +54,28 @@ class NativeHostTests(unittest.TestCase):
             {"version": 1, "providers": providers}, separators=(",", ":")
         ).encode("utf-8")
 
+    def test_tempfail_preserves_safe_reason_without_accepting_success_or_secret(self):
+        for payload, expected in [
+            (b'{"status":"retryable_error","reason":"http_403"}', {"reason": "http_403"}),
+            (b'{"status":"retryable_error","reason":"twitter_csrf_missing"}', {"reason": "twitter_csrf_missing"}),
+            (b'{"status":"retryable_error"}', {}),
+            (b'{"status":"retryable_error","reason":"SECRET"}', {}),
+            (b'{"status":"promoted","reason":"http_403"}', {"reason": "server_error"}),
+            (b'{"status":"retryable_error","cookieHeader":"SECRET"}', {"reason": "server_error"}),
+            (b'SECRET', {"reason": "server_error"}),
+        ]:
+            with self.subTest(payload=payload):
+                diagnostic = {}
+                runner = mock.Mock(return_value=CompletedProcess([], 75, payload, b"SECRET"))
+                status = native_host.send_to_server({"twitter": {"cookieHeader": "auth_token=synthetic"}}, self.config, runner=runner, diagnostic=diagnostic)
+                self.assertEqual(status, "retryable_error")
+                self.assertEqual(diagnostic, expected)
+                runner.assert_called_once()
+
     def test_native_loop_forwards_opt_in_diagnostic_reason(self):
         raw = json.dumps({"version": 1, "diagnostics": True, "providers": {"twitter": {"cookieHeader": "auth_token=synthetic"}}}).encode()
         output = io.BytesIO()
-        runner = mock.Mock(return_value=CompletedProcess([], 0, b'{"status":"retryable_error","reason":"twitter_csrf_missing"}', b"SECRET"))
+        runner = mock.Mock(return_value=CompletedProcess([], 75, b'{"status":"retryable_error","reason":"twitter_csrf_missing"}', b"SECRET"))
         with mock.patch.object(native_host, "load_config", return_value=self.config):
             native_host.run_host(config_path=Path("unused"), stdin=io.BytesIO(native_host.encode_frame(raw)), stdout=output, stderr=io.StringIO(), runner=runner)
         output.seek(0)

@@ -716,6 +716,19 @@ def send_to_server(
         return "retryable_error"
 
     returncode = getattr(result, "returncode", 1)
+    if returncode == 75:
+        # apply intentionally exits EX_TEMPFAIL after emitting a structured
+        # retryable result. Preserve its safe reason, but never accept a
+        # success response from a failed process or trust stderr as JSON.
+        remote_diagnostic: Dict[str, str] = {}
+        status = parse_remote_status(
+            getattr(result, "stdout", b""),
+            remote_diagnostic if diagnostic is not None else None,
+        )
+        if status == "retryable_error":
+            if diagnostic is not None:
+                diagnostic.update(remote_diagnostic)
+            return status
     if returncode != 0:
         if diagnostic is not None:
             # Inspect bounded stderr only in memory; never return or log its text.
