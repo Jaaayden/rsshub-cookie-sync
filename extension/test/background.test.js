@@ -171,7 +171,7 @@ async function sendMessage(event, message) {
   event.dispatch(message, {}, (value) => {
     response = value;
   });
-  await flush();
+  await waitFor(() => response !== undefined, `message ${message.type} should complete`);
   return response;
 }
 
