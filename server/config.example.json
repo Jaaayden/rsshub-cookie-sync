@@ -7,12 +7,16 @@
   "providers": {
     "zhihu": {
       "me_url": "https://www.zhihu.com/api/v4/me?include=is_realname",
-      "moments_url": "https://www.zhihu.com/api/v3/moments?desktop=true&limit=1"
+      "moments_url": "https://www.zhihu.com/api/v3/moments?desktop=true&limit=1",
+      "rsshub_route": null
     },
     "weibo": {
-      "config_url": "https://m.weibo.cn/api/config"
+      "config_url": "https://m.weibo.cn/api/config",
+      "rsshub_route": null
     },
-    "twitter": {}
+    "twitter": {
+      "rsshub_route": null
+    }
   },
   "timeouts": {
     "provider_seconds": 20,
@@ -24,5 +28,6 @@
   "bark": {
     "base_url": "https://api.day.app",
     "device_key": null
-  }
+  },
+  "sync_mode": "direct"
 }

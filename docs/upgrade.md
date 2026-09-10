@@ -1,6 +1,8 @@
-# 从旧版本升级到 v1.2.0
+# 从旧版本升级到 v1.3.0
 
-适用于已经安装并能同步知乎、微博的用户。需要依次更新 **服务端 → Mac Native Host → Edge 扩展**；只替换扩展 ZIP 不够，旧 Host 和服务端不认识 `twitter` provider。
+v1.3.0 默认改为直接同步，解决独立 X 探针 HTTP 404、知乎动态接口非 JSON 阻止上传的问题。旧配置未设置 `sync_mode` 时自动采用 `direct`；已显式配置 `verified` 的用户需改为 `direct`。订阅监控需要额外配置路径，见 [配置说明](route-monitoring.md)，未配置路径时仅检查 RSSHub 服务。
+
+适用于已安装旧版本的用户。需要依次更新 **服务端 → Mac Native Host → Edge 扩展**；只替换扩展 ZIP 不够，旧 Host 和服务端不认识 `twitter` provider。
 
 无需先卸载。保留已有配置、SSH 密钥、站点登录态和服务器 `secrets/rsshub.env`。
 

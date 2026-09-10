@@ -614,6 +614,7 @@ def _request_bytes(providers: Mapping[str, Mapping[str, str]]) -> bytes:
 
 
 DIAGNOSTIC_REASONS = frozenset((
+    "direct_sync",
     "host_configuration_invalid", "ssh_timeout", "ssh_auth_failed", "ssh_host_key_failed",
     "ssh_connection_failed", "server_error", "remote_invalid_response", "candidate_invalid",
     "upstream_temporary_failure", "network_error", "twitter_csrf_missing", "twitter_invalid_response",

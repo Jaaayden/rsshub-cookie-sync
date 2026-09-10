@@ -3,13 +3,13 @@
 [![CI](https://github.com/Jaaayden/rsshub-cookie-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Jaaayden/rsshub-cookie-sync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Jaaayden/rsshub-cookie-sync)](https://github.com/Jaaayden/rsshub-cookie-sync/releases)
 
-RSSHub Cookie Sync 会把 Microsoft Edge 中已经登录的知乎、微博和 X/Twitter 登录态同步到 RSSHub。它会定期检查登录态，在 Cookie 失效时使用已经验证过的新 Cookie 自动修复，并在需要人工登录时通过 Bark 提醒。
+RSSHub Cookie Sync 会把 Microsoft Edge 中已经登录的知乎、微博和 X/Twitter 登录态同步到 RSSHub。默认直接同步凭证，不以独立上游探针作为上传前提；配置订阅路径后，每 15 分钟检查 RSSHub 实际路由，连续异常时通过 Bark 提醒。详见 [同步模式与订阅监控](docs/route-monitoring.md)。
 
 它不修改 RSSHub 源码、不需要 CookieCloud，也不会因为一段时间没有新文章就误报登录失效。
 
 ```text
 Edge 扩展 → 本机 Native Host → SSH → RSSHub 服务器
-                                      ├─ 验证 Cookie
+                                      ├─ 检查凭证格式
                                       ├─ 安全更新 Compose env_file
                                       └─ 定时检查并通过 Bark 告警
 ```
@@ -122,7 +122,7 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
-在提示后粘贴并按回车，内容不会回显。这个入口不会直接改 Compose，而是走与自动同步相同的格式校验、上游验证、候选保存、必要时切换和失败回滚；终端输出也不会包含 Cookie。不要把 Cookie 写进命令参数。完成后按自己的系统策略清理剪贴板。
+在提示后粘贴并按回车，内容不会回显。这个入口不会直接改 Compose，而是走与自动同步相同的格式校验、直接写入和服务健康失败回滚；终端输出也不会包含 Cookie。不要把 Cookie 写进命令参数。完成后按自己的系统策略清理剪贴板。
 
 ## X/Twitter 同步与升级
 
@@ -136,7 +136,7 @@ X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸
 
 已有知乎、微博配置和状态无需重建；没有 X 令牌时，服务端保持待同步，不发送 X 登录失效提醒。初始化允许只配置部分 provider。已有逗号分隔的多账号 `TWITTER_AUTH_TOKEN` 会原样保留，但不会自动接管；服务端状态报告 `twitter_token_pool_unsupported`。
 
-X 验证需要服务端直接访问 `x.com` 和 `api.x.com`，不会自动使用环境代理。验证接口失效、风控、限流或缺少临时 CSRF Cookie 时会稍后重试，保留现有 live 与候选，不会因主页能打开就认为登录有效。详见 [X/Twitter 故障排查](docs/troubleshooting.md#xtwitter)。
+仅显式设置 `sync_mode: "verified"` 时，X 验证需要服务端直接访问 `x.com` 和 `api.x.com`，不会自动使用环境代理。验证接口失效、风控、限流或缺少临时 CSRF Cookie 时会稍后重试，保留现有 live 与候选，不会因主页能打开就认为登录有效。详见 [X/Twitter 故障排查](docs/troubleshooting.md#xtwitter)。
 
 ## Compose 会不会被修改？
 
@@ -271,7 +271,7 @@ python3 native-host/install.py --activate-dedicated-key
 - 客户端：macOS + Microsoft Edge Chromium + Edge Default Profile；
 - 服务端：Linux、systemd、Docker Engine、Docker Compose v2.30+；
 - 运行时只使用 Python 3.9+ 标准库；Node.js 仅用于扩展测试；
-- 服务端每 15 分钟检查 RSSHub、知乎、微博及已配置的 X/Twitter 登录态；连续确认失效后才切换候选；
+- 服务端每 15 分钟检查 RSSHub 及配置的订阅路由；默认不验证上游登录态、不自动切换旧候选；
 - `403`、`429`、`432`、超时和 `5xx` 会被当作临时上游故障，不会立即更换 Cookie；
 - 本项目不自动输入密码，不绕过验证码或 MFA。
 

@@ -196,6 +196,7 @@ class ServerTests(unittest.TestCase):
             ("ZHIHU_COOKIES=" + ZH_OLD + "\nWEIBO_COOKIES=" + WB_OLD + "\nTWITTER_AUTH_TOKEN=t\n").encode(),
         )
         self.config = RuntimeConfig(
+            sync_mode="verified",
             compose_file=self.compose,
             live_env=self.live,
             candidate_dir=root / "secrets" / "candidates",

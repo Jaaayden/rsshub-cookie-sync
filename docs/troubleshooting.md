@@ -1,5 +1,7 @@
 # 故障排查
 
+v1.3.0 默认直接同步，上游 HTTP 404 或非 JSON 不再阻止上传。订阅监控的 `route_http_*` / `route_invalid_feed` 表示实际路由异常，不等同于 Cookie 失效。配置与状态检查见 [订阅监控](route-monitoring.md)。旧版独立探针诊断仅适用于 `verified` 模式。
+
 先按下面的顺序判断问题在哪一段：
 
 ```text

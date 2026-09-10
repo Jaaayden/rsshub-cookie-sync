@@ -37,6 +37,7 @@ export function isKnownHostStatus(status) {
 }
 
 export const DIAGNOSTIC_REASON_LABELS = Object.freeze({
+  direct_sync: '直接同步，未验证上游登录态',
   host_configuration_invalid: '本机 Host 配置或文件权限异常',
   ssh_timeout: 'SSH 或远程处理超时',
   ssh_auth_failed: 'SSH 公钥认证失败',

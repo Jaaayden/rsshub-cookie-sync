@@ -31,7 +31,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -51,6 +52,7 @@ COOKIE_KEYS: Mapping[str, str] = {
 MAX_INPUT_BYTES = 512 * 1024
 MAX_COOKIE_BYTES = 256 * 1024
 MAX_HTTP_BODY_BYTES = 128 * 1024
+MAX_FEED_BYTES = 2 * 1024 * 1024
 HASH_CHARS = 16
 
 # These non-operational library defaults deliberately point at an
@@ -101,6 +103,7 @@ ALLOWED_ERROR_CODES = {
     "twitter_auth_failed",
     "twitter_not_configured",
     "twitter_token_pool_unsupported",
+    "direct_sync",
     "invalid_cookie",
     "live_cookie_missing",
     "http_401",
@@ -523,6 +526,10 @@ def read_env_file(path: Path, missing_ok: bool = True) -> Tuple[bytes, Dict[str,
 
 def _default_provider_state() -> Dict[str, Any]:
     return {
+        "route_probe": "unknown",
+        "route_probe_at": None,
+        "route_failures": 0,
+        "route_error": None,
         "live_hash": None,
         "candidate_hash": None,
         "candidate_received_at": None,
@@ -539,6 +546,8 @@ def _default_provider_state() -> Dict[str, Any]:
 
 
 def _safe_error_code(value: Any) -> Optional[str]:
+    if isinstance(value, str) and re.fullmatch(r"route_(http_[0-9]{3}|network_error|invalid_feed|too_large|ok)", value):
+        return value
     if value in ALLOWED_ERROR_CODES:
         return value
     if isinstance(value, str) and re.fullmatch(r"http_[0-9]{3}", value):
@@ -605,6 +614,9 @@ def _merge_state(value: Any) -> Dict[str, Any]:
             if not isinstance(item, dict):
                 continue
             target = state["providers"][provider]
+            if item.get("route_probe") in ALLOWED_PROBE_STATES:
+                target["route_probe"] = item["route_probe"]
+            target["route_error"] = _safe_error_code(item.get("route_error"))
             if item.get("candidate_validation") in ALLOWED_CANDIDATE_STATES:
                 target["candidate_validation"] = item.get("candidate_validation")
             if item.get("last_probe") in ALLOWED_PROBE_STATES:
@@ -618,13 +630,14 @@ def _merge_state(value: Any) -> Dict[str, Any]:
                 "last_probe_at",
                 "last_success_at",
                 "last_full_probe_at",
+                "route_probe_at",
             ):
                 if key in item and (item[key] is None or type(item[key]) is int):
                     target[key] = item[key]
             for key in ("live_hash", "candidate_hash"):
                 if key in item and (item[key] is None or (isinstance(item[key], str) and re.fullmatch(r"[0-9a-f]{16}", item[key]))):
                     target[key] = item[key]
-            for key in ("auth_failures", "transient_failures"):
+            for key in ("auth_failures", "transient_failures", "route_failures"):
                 try:
                     target[key] = max(0, int(item.get(key, target[key])))
                 except (TypeError, ValueError):
@@ -749,6 +762,8 @@ class RuntimeConfig:
     config_file: Path = DEFAULT_CONFIG_FILE
     project: str = DEFAULT_PROJECT
     service: str = DEFAULT_SERVICE
+    sync_mode: str = "direct"
+    rsshub_routes: Dict[str, str] = field(default_factory=dict)
     provider_timeout: float = 20.0
     health_timeout: float = 90.0
     health_poll_seconds: float = 1.0
@@ -845,6 +860,8 @@ class RuntimeConfig:
             timeouts = data.get("timeouts", {})
             values.update(
                 {
+                    "sync_mode": data.get("sync_mode", cls.sync_mode),
+                    "rsshub_routes": {name: providers[name]["rsshub_route"] for name in PROVIDERS if providers.get(name, {}).get("rsshub_route") is not None},
                     "rsshub_base_url": rsshub.get("base_url", cls.rsshub_base_url),
                     "rsshub_health_path": rsshub.get("health_path", cls.rsshub_health_path),
                     "rsshub_access_key": rsshub.get("access_key"),
@@ -880,6 +897,17 @@ class RuntimeConfig:
         raise InvalidInput("unknown provider")
 
     def validate(self) -> None:
+        if self.sync_mode not in ("direct", "verified"):
+            raise SyncError("sync_mode must be direct or verified")
+        if not isinstance(self.rsshub_routes, dict):
+            raise SyncError("invalid RSSHub routes")
+        for provider, route in self.rsshub_routes.items():
+            if (provider not in PROVIDERS or not isinstance(route, str)
+                    or not route.startswith("/" + provider + "/")
+                    or len(route) > 2048 or any(ord(c) < 33 or ord(c) == 127 for c in route)
+                    or "\\" in route or urlsplit(route).query or urlsplit(route).fragment
+                    or any(part in (".", "..") for part in route.split("/"))):
+                raise SyncError("RSSHub route must be a provider path without query or fragment")
         _validate_compose_project(self.project)
         _validate_compose_service(self.service)
         for path in (
@@ -1016,18 +1044,19 @@ class HTTPTransport:
         headers: Optional[Mapping[str, str]] = None,
         body: Optional[bytes] = None,
         timeout: float = 20.0,
+        max_body_bytes: int = MAX_HTTP_BODY_BYTES,
     ) -> HTTPResponse:
         request = Request(url, data=body, headers=dict(headers or {}), method=method)
         try:
             with self._opener.open(request, timeout=timeout) as response:
                 return HTTPResponse(
                     int(response.getcode()),
-                    response.read(MAX_HTTP_BODY_BYTES + 1),
+                    response.read(max_body_bytes + 1),
                     tuple(response.headers.get_all("Set-Cookie", [])),
                 )
         except HTTPError as exc:
             try:
-                response_body = exc.read(MAX_HTTP_BODY_BYTES + 1)
+                response_body = exc.read(max_body_bytes + 1)
             except Exception:
                 response_body = b""
             return HTTPResponse(int(exc.code), response_body, tuple(exc.headers.get_all("Set-Cookie", [])))
@@ -1462,6 +1491,13 @@ class SyncService:
             return None
         return value
 
+    @staticmethod
+    def _mark_direct(item: MutableMapping[str, Any]) -> None:
+        # Transport success is not evidence of upstream authentication.
+        item.update(last_probe="unknown", last_probe_at=None, last_full_probe_at=None,
+                    last_success_at=None, auth_failures=0, transient_failures=0,
+                    last_error=None)
+
     def _save_candidate(self, provider: str, cookie: str) -> None:
         validate_provider_value(provider, cookie)
         atomic_write(self._candidate_path(provider), cookie.encode("utf-8"), mode=0o600)
@@ -1651,6 +1687,8 @@ class SyncService:
                 raise TransactionError("rsshub health check failed")
             post_transient: Dict[str, ProbeResult] = {}
             for provider, cookie in updates.items():
+                if self.config.sync_mode == "direct":
+                    continue
                 result = self.prober.probe(provider, cookie, full=True)
                 if result.kind == "auth_failed":
                     # A candidate that was valid before recreation should not
@@ -1682,11 +1720,14 @@ class SyncService:
                     item["auth_failures"] = 0
                     item["transient_failures"] = 0
                     item["last_error"] = None
+                if self.config.sync_mode == "direct":
+                    self._mark_direct(item)
                 self._safe_notification(
                     state,
                     "promoted:" + provider,
                     "RSSHub Cookie 已自动更新",
-                    provider + " 登录态已验证并完成切换。",
+                    (provider + " 凭证已直接同步，RSSHub 健康检查通过；未验证上游登录态。")
+                    if self.config.sync_mode == "direct" else provider + " 登录态已验证并完成切换。",
                 )
             state["compose"]["last_recreate_at"] = self.clock.now()
             state["compose"]["last_probe"] = "ok"
@@ -1773,6 +1814,23 @@ class SyncService:
                     reasons[provider] = "twitter_token_pool_unsupported"
                     results[provider] = "rejected_invalid"
                     continue
+                if self.config.sync_mode == "direct":
+                    current = live_values.get(COOKIE_KEYS[provider], "")
+                    if current == cookie:
+                        try:
+                            self._remove_candidate(provider)
+                        except SyncError:
+                            results[provider] = "retryable_error"
+                            reasons[provider] = "server_error"
+                            continue
+                        item = state["providers"][provider]
+                        self._clear_candidate_metadata(item)
+                        self._mark_direct(item)
+                        item["live_hash"] = sha256_prefix(cookie)
+                        results[provider] = "unchanged"
+                    else:
+                        to_promote[provider] = cookie
+                    continue
                 result = self.prober.probe(provider, cookie, full=True)
                 reasons[provider] = _safe_error_code(result.reason) or "upstream_temporary_failure"
                 if result.kind == "auth_failed":
@@ -1846,6 +1904,8 @@ class SyncService:
                     if payload.get("diagnostics") and status in ("retryable_error", "rejected_invalid"):
                         failed = next(p for p, value in results.items() if value == status)
                         response["reason"] = reasons.get(failed, "candidate_invalid" if status == "rejected_invalid" else "server_error")
+                    if payload.get("diagnostics") and self.config.sync_mode == "direct" and status in ("promoted", "unchanged"):
+                        response["reason"] = "direct_sync"
                     return response
             return {"status": "retryable_error"}
 
@@ -1854,6 +1914,44 @@ class SyncService:
         last_full = item.get("last_full_probe_at")
         full = not isinstance(last_full, (int, float)) or current - int(last_full) >= self.config.moments_interval
         return self.prober.probe(provider, cookie, full=full), full
+
+    def _monitor_route(self, state: Dict[str, Any], provider: str) -> None:
+        item = state["providers"][provider]
+        route = self.config.rsshub_routes[provider]
+        url = _append_query(self.config.rsshub_base_url.rstrip("/") + route, self.config.rsshub_access_key)
+        error = None
+        try:
+            response = self.transport.request(url, timeout=self.config.provider_timeout,
+                                              max_body_bytes=MAX_FEED_BYTES)
+            if response.status != 200:
+                error = "route_http_" + str(response.status)
+            elif len(response.body) > MAX_FEED_BYTES:
+                error = "route_too_large"
+            else:
+                # Reject declarations, including UTF-16/32 encodings, before parsing.
+                scan = response.body.replace(b"\x00", b"").upper()
+                if b"<!DOCTYPE" in scan or b"<!ENTITY" in scan:
+                    error = "route_invalid_feed"
+                else:
+                    root = ET.fromstring(response.body)
+                    if not ((root.tag == "rss" and root.find("channel") is not None)
+                            or root.tag == "{http://www.w3.org/2005/Atom}feed"):
+                        error = "route_invalid_feed"
+        except (ET.ParseError, ValueError, LookupError):
+            error = "route_invalid_feed"
+        except (ProbeError, OSError, TimeoutError):
+            error = "route_network_error"
+        previous_failures = item["route_failures"]
+        item["route_probe_at"] = self.clock.now()
+        item["route_probe"] = "transient" if error else "ok"
+        item["route_error"] = error
+        item["route_failures"] = previous_failures + 1 if error else 0
+        if error and item["route_failures"] >= 2:
+            self._safe_notification(state, "route_failed:" + provider, "RSSHub 订阅路由异常",
+                                    provider + " 订阅路由连续检查失败（" + error + "），请检查抓取情况；凭证保持不变。")
+        elif not error and previous_failures >= 2:
+            self._safe_notification(state, "route_recovered:" + provider, "RSSHub 订阅路由已恢复",
+                                    provider + " 已恢复返回有效订阅；结果可能来自 RSSHub 缓存。")
 
     def monitor(self) -> Dict[str, Any]:
         with file_lock(self.config.lock_file):
@@ -1888,6 +1986,16 @@ class SyncService:
             for provider in PROVIDERS:
                 item = state["providers"][provider]
                 cookie = live_values.get(COOKIE_KEYS[provider], "")
+                if self.config.sync_mode == "direct":
+                    self._mark_direct(item)
+                    item["live_hash"] = sha256_prefix(cookie) if cookie else None
+                    if provider == "twitter" and "," in cookie:
+                        item["last_error"] = "twitter_token_pool_unsupported"
+                    if cookie and provider in self.config.rsshub_routes and health.ok:
+                        self._monitor_route(state, provider)
+                    elif not cookie or provider not in self.config.rsshub_routes:
+                        item.update(route_probe="unknown", route_probe_at=None, route_failures=0, route_error=None)
+                    continue
                 if provider == "twitter" and (not cookie or "," in cookie):
                     item["last_probe"] = "unknown"
                     item["last_error"] = "twitter_token_pool_unsupported" if cookie else "twitter_not_configured"
@@ -2012,6 +2120,11 @@ class SyncService:
                     if provider == "twitter" and "," in cookie:
                         state["providers"][provider]["last_error"] = "twitter_token_pool_unsupported"
                         continue
+                    if self.config.sync_mode == "direct":
+                        item = state["providers"][provider]
+                        self._mark_direct(item)
+                        item["live_hash"] = sha256_prefix(cookie)
+                        continue
                     result = self.prober.probe(provider, cookie, full=True)
                     if not result.ok:
                         raise SyncError("rsshub bootstrap provider check failed")
@@ -2047,6 +2160,10 @@ class SyncService:
             providers[provider] = {
                 key: source.get(key)
                 for key in (
+                    "route_probe",
+                    "route_probe_at",
+                    "route_failures",
+                    "route_error",
                     "candidate_received_at",
                     "candidate_validated_at",
                     "candidate_validation",
@@ -2070,6 +2187,7 @@ class SyncService:
         return {
             "version": 1,
             "updated_at": state.get("updated_at") if isinstance(state, dict) else None,
+            "sync_mode": self.config.sync_mode,
             "bootstrap": {"status": bootstrap_status},
             "providers": providers,
             "compose": {

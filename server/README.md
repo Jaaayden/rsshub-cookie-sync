@@ -2,7 +2,7 @@
 
 [返回项目总览](../README.md)
 
-这里的程序运行在 RSSHub 所在的 Linux 服务器上。它接收 Edge 上传的候选 Cookie，在服务器网络中验证知乎、微博和 X/Twitter 登录态，必要时安全地更新 RSSHub，并由 systemd 每 15 分钟检查一次。
+这里的程序运行在 RSSHub 所在的 Linux 服务器上。默认接收 Edge 上传的凭证并直接安全更新 RSSHub，不调用独立上游登录探针。systemd 每 15 分钟检查服务及配置的实际订阅路由，详见 [同步模式与订阅监控](../docs/route-monitoring.md)。
 
 服务端不提供公网 API，不会主动连接你的 Mac，也不需要安装 Python 第三方包。
 
@@ -83,7 +83,7 @@ TWITTER_AUTH_TOKEN
 
 ## X/Twitter
 
-`twitter` provider 无需新增配置。探针固定访问 `https://x.com/` 获取临时 `ct0`，再携带 Web 客户端认证头访问 `https://api.x.com/1.1/account/settings.json`。只有包含有效账户名的成功 JSON 才表示登录有效；不跟随重定向，不持久化临时 CSRF Cookie，不读取环境代理。
+`twitter` 同步无需新增配置；订阅监控需配置 `rsshub_route`。仅在显式选择 `sync_mode: "verified"` 时，探针固定访问 `https://x.com/` 获取临时 `ct0`，再携带 Web 客户端认证头访问 `https://api.x.com/1.1/account/settings.json`。只有包含有效账户名的成功 JSON 才表示登录有效；不跟随重定向，不持久化临时 CSRF Cookie，不读取环境代理。
 
 请求使用协议 v1 的 `cookieHeader: "auth_token=值"`；live env 的 `TWITTER_AUTH_TOKEN`、候选文件和服务端哈希均使用裸令牌。手动隐藏输入同时接受裸令牌与单个 `auth_token=值`。
 
@@ -129,7 +129,7 @@ Native Host 安装器会在 Mac 上默认创建 `~/.ssh/rsshub-cookie-sync`，�
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
-在提示后粘贴并按回车，内容不会回显。命令会使用与自动上传完全相同的输入限制、登录态探针、候选策略和事务回滚；它不会把 Cookie 放进命令参数或日志，也不要求手工编辑 Compose。无效 Cookie 会被拒绝，当前有效配置保持不变。
+在提示后粘贴并按回车，内容不会回显。命令会使用与自动上传完全相同的输入限制、同步模式和事务回滚；它不会把 Cookie 放进命令参数或日志，也不要求手工编辑 Compose。格式错误会被拒绝；默认模式不判断上游凭证有效性。
 
 ## 文件和权限
 
@@ -162,7 +162,7 @@ systemctl list-timers rsshub-cookie-sync-monitor.timer
 journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 ```
 
-每 15 分钟检查 RSSHub、知乎、微博及已配置的 X/Twitter。连续两次明确认证失败才会尝试切换已验证候选；`403`、`429`、`432`、超时和 `5xx` 会暂时归类为上游故障，不会立即换 Cookie。
+默认每 15 分钟检查 RSSHub 服务及配置的订阅路径，连续两次路由异常通知，恢复通知；不会因此更换凭证。仅 `verified` 模式使用旧上游探针：连续两次明确认证失败才会尝试切换已验证候选；`403`、`429`、`432`、超时和 `5xx` 会暂时归类为上游故障，不会立即换 Cookie。
 
 ## 升级和重装
 
