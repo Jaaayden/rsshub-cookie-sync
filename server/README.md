@@ -2,7 +2,7 @@
 
 [返回项目总览](../README.md)
 
-这里的程序运行在 RSSHub 所在的 Linux 服务器上。它接收 Edge 上传的候选 Cookie，在服务器网络中验证知乎和微博登录态，必要时安全地更新 RSSHub，并由 systemd 每 15 分钟检查一次。
+这里的程序运行在 RSSHub 所在的 Linux 服务器上。它接收 Edge 上传的候选 Cookie，在服务器网络中验证知乎、微博和 X/Twitter 登录态，必要时安全地更新 RSSHub，并由 systemd 每 15 分钟检查一次。
 
 服务端不提供公网 API，不会主动连接你的 Mac，也不需要安装 Python 第三方包。
 
@@ -12,7 +12,7 @@
 - Docker Engine 和 Docker Compose v2.30 或更高版本；
 - `sudo` 软件包（安装器用 `visudo` 验证受限账号的最小权限）；
 - 已经可以启动的 RSSHub Compose 文件；
-- 服务器能访问知乎、微博；
+- 服务器能直接通过 HTTPS 访问知乎、微博及 `x.com`、`api.x.com`；
 - SSH 服务正在运行。主机密钥类型由 OpenSSH 协商，不限定为 Ed25519。
 
 `format: raw` 是为了原样读取 Cookie 中的特殊字符，需要 Compose v2.30+。版本不足时先升级 Compose，不要把 Cookie 改回 YAML。
@@ -81,6 +81,16 @@ TWITTER_AUTH_TOKEN
 
 因此答案很明确：首次接入会修改原 `docker-compose.yml`，但范围仅限于把三项 secret 迁到 `env_file`；日常同步不会把 Cookie 写回 YAML。
 
+## X/Twitter
+
+`twitter` provider 无需新增配置。探针固定访问 `https://x.com/` 获取临时 `ct0`，再携带 Web 客户端认证头访问 `https://api.x.com/1.1/account/settings.json`。只有包含有效账户名的成功 JSON 才表示登录有效；不跟随重定向，不持久化临时 CSRF Cookie，不读取环境代理。
+
+请求使用协议 v1 的 `cookieHeader: "auth_token=值"`；live env 的 `TWITTER_AUTH_TOKEN`、候选文件和服务端哈希均使用裸令牌。手动隐藏输入同时接受裸令牌与单个 `auth_token=值`。
+
+未配置 X 时不探测、不告警；旧状态自动补齐 Twitter 字段。初始化只检查已配置的 provider，`bootstrap.status=seeded` 表示至少配置了一项，不代表所有站点健康。已有多账号令牌池会保留并报告 `twitter_token_pool_unsupported`，不会用浏览器单账号覆盖。
+
+先升级服务端，再升级 Mac Native Host 和 Edge 扩展；保留已有配置、密钥和 live env。暂时失败不会删除候选或切换 live。真实接口可用性取决于部署网络和 X 当前接口，参阅 [故障排查](../docs/troubleshooting.md#xtwitter)。
+
 ## Bark 配置
 
 Bark 是可选的。不配置时同步、自愈和服务器监控仍然工作，只是不推送通知。
@@ -111,11 +121,12 @@ Native Host 安装器会在 Mac 上默认创建 `~/.ssh/rsshub-cookie-sync`，�
 
 ## 手动应急更新 Cookie
 
-扩展的知乎、微博卡片各有一个“复制 Cookie”按钮。需要手工处理时，复制对应 Cookie，以 root 登录服务器并运行：
+扩展的知乎、微博卡片各有一个“复制 Cookie”按钮，X/Twitter 卡片提供“复制 Auth Token”。需要手工处理时，复制对应 Cookie，以 root 登录服务器并运行：
 
 ```sh
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider zhihu
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider weibo
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
 在提示后粘贴并按回车，内容不会回显。命令会使用与自动上传完全相同的输入限制、登录态探针、候选策略和事务回滚；它不会把 Cookie 放进命令参数或日志，也不要求手工编辑 Compose。无效 Cookie 会被拒绝，当前有效配置保持不变。
@@ -151,7 +162,7 @@ systemctl list-timers rsshub-cookie-sync-monitor.timer
 journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 ```
 
-每 15 分钟检查 RSSHub、知乎和微博。连续两次明确认证失败才会尝试切换已验证候选；`403`、`429`、`432`、超时和 `5xx` 会暂时归类为上游故障，不会立即换 Cookie。
+每 15 分钟检查 RSSHub、知乎、微博及已配置的 X/Twitter。连续两次明确认证失败才会尝试切换已验证候选；`403`、`429`、`432`、超时和 `5xx` 会暂时归类为上游故障，不会立即换 Cookie。
 
 ## 升级和重装
 

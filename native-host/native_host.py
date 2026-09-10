@@ -72,7 +72,7 @@ MAX_FRAME_BYTES = 1024 * 1024
 MAX_COOKIE_BYTES = 128 * 1024
 MAX_IDENTITIES = 256
 
-ALLOWED_PROVIDERS = frozenset(("zhihu", "weibo"))
+ALLOWED_PROVIDERS = frozenset(("zhihu", "weibo", "twitter"))
 ALLOWED_REMOTE_STATUSES = frozenset(
     ("unchanged", "candidate_saved", "promoted", "rejected_invalid", "retryable_error")
 )
@@ -596,7 +596,10 @@ def validate_request(raw: bytes) -> Dict[str, Dict[str, str]]:
             raise ProtocolError("provider details must be an object")
         if set(details) != {"cookieHeader"}:
             raise ProtocolError("invalid provider details")
-        canonical[provider] = {"cookieHeader": _validate_cookie_header(details["cookieHeader"])}
+        header = _validate_cookie_header(details["cookieHeader"])
+        if provider == "twitter" and (len(header) > 4096 or not re.fullmatch(r"auth_token=[A-Za-z0-9_-]+", header)):
+            raise ProtocolError("invalid Twitter auth token")
+        canonical[provider] = {"cookieHeader": header}
     return canonical
 
 

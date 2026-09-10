@@ -16,10 +16,11 @@ Edge 权限 → Native Host → SSH 公钥/主机密钥 → 服务器探针 → 
 
 ## 显示“需授权”或“未找到 Cookie”
 
-点击“授权站点权限”，允许知乎和微博的精确站点权限。然后确认：
+点击“授权站点权限”，允许知乎、微博和 X/Twitter 的精确站点权限。然后确认：
 
 - 知乎使用 `www.zhihu.com` 登录；
 - 微博使用 `m.weibo.cn` 移动站登录；
+- X/Twitter 优先在 `x.com` 登录，旧 `twitter.com` Cookie 仅作为无 X 令牌时的回退；
 - 登录发生在当前 Edge Profile；
 - 站点没有刚刚注销或触发重新登录。
 
@@ -100,7 +101,7 @@ python3 native-host/install.py --activate-dedicated-key
 
 ## `候选被拒绝`
 
-这表示知乎或微博的登录态探针明确失败。无效候选不会覆盖 live env，也不会重建 RSSHub。请在 Edge 重新登录对应 provider，再点“立即同步”。
+这表示对应 provider 的登录态探针明确失败。无效候选不会覆盖 live env，也不会重建 RSSHub。请在 Edge 重新登录对应 provider，再点“立即同步”。
 
 如果自动链路暂时不可用，也可以在扩展中复制对应 Cookie，再在服务器运行 `rsshub-cookie-sync manual-update --provider zhihu` 或 `--provider weibo` 的完整安装路径命令。具体命令见[项目首页的手动应急更新](../README.md#手动应急更新-cookie)。不要直接编辑 `rsshub.env`，否则会绕过验证和回滚事务。
 
@@ -163,3 +164,18 @@ journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 ## 仍然无法解决
 
 提交问题时只提供：软件版本、操作系统、脱敏状态字段、HTTP 状态码和分类原因。请先阅读 [安全策略](../SECURITY.md)，不要提供 Cookie、Bark Key、私钥、完整 Compose 或真实请求头。
+
+## X/Twitter
+
+先确认服务端、Native Host、扩展都升级到了包含 Twitter 支持的版本，并在重新加载扩展后点击“授权站点权限”。只更新扩展时，旧 Native Host 或服务端会拒绝 `twitter` provider。
+
+- `twitter_not_configured`：服务端没有 X live 令牌，正常等待首次有效同步，不发送 X 登录失效提醒。
+- `twitter_token_pool_unsupported`：已有 `TWITTER_AUTH_TOKEN` 是多账号列表，自动接管已停止，原值仍保留。当前版本只自动管理单账号；需要保留令牌池时继续手动管理。
+- `twitter_csrf_missing`：X 首页没有返回唯一可用的临时 `ct0`，本次验证暂不可用。
+- `twitter_invalid_response`、`http_404`：账户接口可能变化或返回风控页面，不表示令牌已失效。
+- `http_403`、`http_429`、超时或 `5xx`：按临时上游故障重试；持续失败沿用现有 Bark 故障提醒，不覆盖 live 或有效候选。
+- `http_401`、`twitter_auth_failed`：明确认证失败。定时监控连续两次失败后才尝试有效候选；没有有效候选时提醒重新登录。
+
+服务端必须直接访问 `x.com` 和 `api.x.com`，不会继承 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。不要通过把凭证发到自定义验证地址来排查。模拟测试只验证本项目的响应处理和回滚行为，部署后仍需用“立即同步”和脱敏服务端状态确认真实链路。
+
+扩展读取失败也可能是同一域出现多个不同的 `auth_token`。请在同一个 Edge Default Profile 重新登录 X；不会静默选取冲突值或混合两个域的 Cookie。X/Twitter 的“复制 Auth Token”输出裸令牌，可通过 `manual-update --provider twitter` 的隐藏提示输入。

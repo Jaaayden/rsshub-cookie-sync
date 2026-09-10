@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
@@ -41,10 +42,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 LOG = logging.getLogger("rsshub-cookie-sync")
 
-PROVIDERS: Tuple[str, ...] = ("zhihu", "weibo")
+PROVIDERS: Tuple[str, ...] = ("zhihu", "weibo", "twitter")
 COOKIE_KEYS: Mapping[str, str] = {
     "zhihu": "ZHIHU_COOKIES",
     "weibo": "WEIBO_COOKIES",
+    "twitter": "TWITTER_AUTH_TOKEN",
 }
 MAX_INPUT_BYTES = 512 * 1024
 MAX_COOKIE_BYTES = 256 * 1024
@@ -94,6 +96,11 @@ ALLOWED_CANDIDATE_STATES = {None, "ok", "rejected_invalid", "retryable_error"}
 ALLOWED_BOOTSTRAP_STATES = {"unknown", "seeded", "unseeded"}
 ALLOWED_ERROR_CODES = {
     None,
+    "twitter_csrf_missing",
+    "twitter_invalid_response",
+    "twitter_auth_failed",
+    "twitter_not_configured",
+    "twitter_token_pool_unsupported",
     "invalid_cookie",
     "live_cookie_missing",
     "http_401",
@@ -293,6 +300,35 @@ def sha256_prefix(value: str | bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:HASH_CHARS]
 
 
+def twitter_token(value: Any, *, header: bool = False) -> str:
+    validate_cookie_shape(value)
+    if header:
+        if not value.startswith("auth_token="):
+            raise InvalidInput("invalid Twitter auth token")
+        value = value[len("auth_token="):]
+    if len(value) > 4085 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise InvalidInput("invalid Twitter auth token")
+    return value
+
+
+def validate_provider_value(provider: str, value: Any) -> str:
+    return twitter_token(value) if provider == "twitter" else validate_cookie_header(value)
+
+
+def validate_env_secret(key: str, value: str) -> None:
+    if key == "TWITTER_AUTH_TOKEN":
+        # Empty optional credentials and existing pools must survive migration
+        # verbatim. Automatic updates validate single tokens before this layer.
+        if not value:
+            return
+        if "," in value:
+            validate_cookie_shape(value)
+        else:
+            twitter_token(value)
+    elif key in COOKIE_KEYS.values():
+        validate_cookie_header(value)
+
+
 def validate_cookie_header(value: Any) -> str:
     """Validate a browser Cookie request header without normalising secrets."""
 
@@ -349,7 +385,11 @@ def build_manual_update_request(provider: Any, cookie_header: Any) -> Dict[str, 
     """Build one normal apply request from a hidden interactive Cookie input."""
 
     provider_name = validate_provider(provider)
-    cookie = validate_cookie_header(cookie_header)
+    if provider_name == "twitter":
+        token = twitter_token(cookie_header, header=isinstance(cookie_header, str) and cookie_header.startswith("auth_token="))
+        cookie = "auth_token=" + token
+    else:
+        cookie = validate_cookie_header(cookie_header)
     return {
         "version": 1,
         "providers": {provider_name: {"cookieHeader": cookie}},
@@ -443,7 +483,7 @@ def render_env(data: bytes, updates: Mapping[str, str]) -> bytes:
     for key in updates:
         if not KEY_RE.fullmatch(key):
             raise SyncError("invalid env key")
-        validate_cookie_header(updates[key]) if key in COOKIE_KEYS.values() else None
+        validate_env_secret(key, updates[key])
     lines = text.splitlines(keepends=True)
     seen: set[str] = set()
     out: list[str] = []
@@ -566,7 +606,7 @@ def _merge_state(value: Any) -> Dict[str, Any]:
                 continue
             target = state["providers"][provider]
             if item.get("candidate_validation") in ALLOWED_CANDIDATE_STATES:
-                target["candidate_validation"] = item["candidate_validation"]
+                target["candidate_validation"] = item.get("candidate_validation")
             if item.get("last_probe") in ALLOWED_PROBE_STATES:
                 target["last_probe"] = item["last_probe"]
             safe_provider_error = _safe_error_code(item.get("last_error"))
@@ -835,6 +875,8 @@ class RuntimeConfig:
             return self.zhihu_moments_url if full else self.zhihu_me_url
         if provider == "weibo":
             return self.weibo_config_url
+        if provider == "twitter":
+            return "https://api.x.com/1.1/account/settings.json"
         raise InvalidInput("unknown provider")
 
     def validate(self) -> None:
@@ -941,6 +983,7 @@ class RuntimeConfig:
 class HTTPResponse:
     status: int
     body: bytes
+    set_cookies: Tuple[str, ...] = ()
 
 
 class HTTPTransport:
@@ -977,13 +1020,17 @@ class HTTPTransport:
         request = Request(url, data=body, headers=dict(headers or {}), method=method)
         try:
             with self._opener.open(request, timeout=timeout) as response:
-                return HTTPResponse(int(response.getcode()), response.read(MAX_HTTP_BODY_BYTES + 1))
+                return HTTPResponse(
+                    int(response.getcode()),
+                    response.read(MAX_HTTP_BODY_BYTES + 1),
+                    tuple(response.headers.get_all("Set-Cookie", [])),
+                )
         except HTTPError as exc:
             try:
                 response_body = exc.read(MAX_HTTP_BODY_BYTES + 1)
             except Exception:
                 response_body = b""
-            return HTTPResponse(int(exc.code), response_body)
+            return HTTPResponse(int(exc.code), response_body, tuple(exc.headers.get_all("Set-Cookie", [])))
         except (URLError, TimeoutError, OSError) as exc:
             raise ProbeError("network error") from exc
 
@@ -1136,8 +1183,58 @@ class ProviderProber:
             return ProbeResult("auth_failed", response.status, "config_logged_out")
         return ProbeResult("ok", response.status, "config_ok")
 
+    def probe_twitter(self, token: str) -> ProbeResult:
+        try:
+            token = twitter_token(token)
+        except InvalidInput:
+            return ProbeResult("auth_failed", None, "invalid_cookie")
+        response, result = self._get("twitter", "https://x.com/", "auth_token=" + token)
+        if response is None or result.kind != "ok":
+            return result
+        csrf_values = set()
+        for raw in response.set_cookies:
+            if len(raw) > 16384:
+                continue
+            try:
+                cookies = SimpleCookie()
+                cookies.load(raw)
+                morsel = cookies.get("ct0")
+                if morsel and morsel["domain"].lstrip(".").lower() in ("", "x.com") and morsel["path"] in ("", "/"):
+                    if re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", morsel.value):
+                        csrf_values.add(morsel.value)
+            except CookieError:
+                continue
+        if len(csrf_values) != 1:
+            return ProbeResult("transient", response.status, "twitter_csrf_missing")
+        csrf = next(iter(csrf_values))
+        # Public X web-client bearer identifier, also used by RSSHub's web API.
+        bearer = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+        headers = self._headers("auth_token=" + token + "; ct0=" + csrf, "twitter")
+        headers.update({"Authorization": bearer, "x-csrf-token": csrf,
+                        "x-twitter-auth-type": "OAuth2Session", "x-twitter-active-user": "yes",
+                        "Referer": "https://x.com/"})
+        try:
+            response = self.transport.request("https://api.x.com/1.1/account/settings.json",
+                                              headers=headers, timeout=self.config.provider_timeout)
+        except ProbeError:
+            return ProbeResult("transient", None, "network_error")
+        kind = _classify_status(response.status)
+        if kind != "ok":
+            return ProbeResult(kind, response.status, "http_" + str(response.status))
+        payload = _response_json(response)
+        if isinstance(payload, dict):
+            errors = payload.get("errors")
+            if isinstance(errors, list) and any(isinstance(e, dict) and type(e.get("code")) is int and e["code"] in (32, 89) for e in errors):
+                return ProbeResult("auth_failed", response.status, "twitter_auth_failed")
+            name = payload.get("screen_name")
+            if not errors and isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_]{1,15}", name):
+                return ProbeResult("ok", response.status, "profile_ok")
+        return ProbeResult("transient", response.status, "twitter_invalid_response")
+
     def probe(self, provider: str, cookie: str, full: bool = False) -> ProbeResult:
         validate_provider(provider)
+        if provider == "twitter":
+            return self.probe_twitter(cookie)
         return self.probe_zhihu(cookie, full=full) if provider == "zhihu" else self.probe_weibo(cookie)
 
 
@@ -1360,13 +1457,13 @@ class SyncService:
             return None
         try:
             value = data.decode("utf-8", "strict")
-            validate_cookie_header(value)
+            validate_provider_value(provider, value)
         except (UnicodeDecodeError, InvalidInput, SyncError):
             return None
         return value
 
     def _save_candidate(self, provider: str, cookie: str) -> None:
-        validate_cookie_header(cookie)
+        validate_provider_value(provider, cookie)
         atomic_write(self._candidate_path(provider), cookie.encode("utf-8"), mode=0o600)
 
     def _remove_candidate(self, provider: str) -> None:
@@ -1390,21 +1487,10 @@ class SyncService:
 
     @staticmethod
     def _set_bootstrap_status(state: MutableMapping[str, Any], live_values: Mapping[str, str]) -> str:
-        """Record whether both provider Cookies have been seeded.
-
-        An empty/absent pair is the expected state immediately after a fresh
-        RSSHub install.  A partial pair remains ``unknown`` so bootstrap and
-        operators cannot accidentally treat an incomplete configuration as a
-        healthy seeded installation.
-        """
+        """Track whether at least one provider is configured; providers are independent."""
 
         present = [bool(live_values.get(COOKIE_KEYS[provider], "")) for provider in PROVIDERS]
-        if all(present):
-            status = "seeded"
-        elif not any(present):
-            status = "unseeded"
-        else:
-            status = "unknown"
+        status = "seeded" if any(present) else "unseeded"
         bootstrap = state.setdefault("bootstrap", {})
         bootstrap["status"] = status
         return status
@@ -1524,8 +1610,10 @@ class SyncService:
             return
         for provider, cookie in updates.items():
             validate_provider(provider)
-            validate_cookie_header(cookie)
+            validate_provider_value(provider, cookie)
         old_data, old_values = self._read_live()
+        if "twitter" in updates and "," in old_values.get("TWITTER_AUTH_TOKEN", ""):
+            raise InvalidInput("Twitter token pools cannot be automatically managed")
         effective_updates = {
             provider: cookie
             for provider, cookie in updates.items()
@@ -1661,7 +1749,8 @@ class SyncService:
             if not isinstance(item, dict) or set(item) != {"cookieHeader"}:
                 raise InvalidInput("invalid provider payload")
             try:
-                cookie_values[provider] = validate_cookie_header(item["cookieHeader"])
+                cookie_values[provider] = (twitter_token(item["cookieHeader"], header=True)
+                                           if provider == "twitter" else validate_cookie_header(item["cookieHeader"]))
             except InvalidInput:
                 # Keep independent provider updates independent: a malformed
                 # Weibo value must not prevent a valid Zhihu candidate from
@@ -1678,6 +1767,10 @@ class SyncService:
             for provider in invalid_providers:
                 results[provider] = "rejected_invalid"
             for provider, cookie in cookie_values.items():
+                if provider == "twitter" and "," in live_values.get("TWITTER_AUTH_TOKEN", ""):
+                    state["providers"][provider]["last_error"] = "twitter_token_pool_unsupported"
+                    results[provider] = "rejected_invalid"
+                    continue
                 result = self.prober.probe(provider, cookie, full=True)
                 if result.kind == "auth_failed":
                     results[provider] = "rejected_invalid"
@@ -1788,6 +1881,12 @@ class SyncService:
             for provider in PROVIDERS:
                 item = state["providers"][provider]
                 cookie = live_values.get(COOKIE_KEYS[provider], "")
+                if provider == "twitter" and (not cookie or "," in cookie):
+                    item["last_probe"] = "unknown"
+                    item["last_error"] = "twitter_token_pool_unsupported" if cookie else "twitter_not_configured"
+                    item["auth_failures"] = 0
+                    item["transient_failures"] = 0
+                    continue
                 if not cookie:
                     result = ProbeResult("auth_failed", None, "live_cookie_missing")
                     full = False
@@ -1863,12 +1962,11 @@ class SyncService:
 
         This is intentionally a separate, explicit installation step.  It
         recreates only the RSSHub service (never ``pull``/``down``/Redis), then
-        checks the process health endpoint.  Existing installations with both
-        provider Cookies also run both provider login probes.  A fresh
+        checks the process health endpoint and each configured provider.
+        Existing Twitter token pools are preserved but not managed. A fresh
         installation has no provider Cookies yet; it is marked ``unseeded``
         after the Compose/RSSHub checks and can receive its first valid Cookie
-        through ``apply``.  A partial pair is rejected instead of being
-        treated as a fresh installation.
+        through ``apply``. Providers can be configured independently.
 
         A failed bootstrap leaves the existing env file untouched and the
         caller must not enable the monitor timer.
@@ -1887,8 +1985,6 @@ class SyncService:
             _, values = self._read_live()
             cookies = {provider: values.get(COOKIE_KEYS[provider], "") for provider in PROVIDERS}
             missing = [provider for provider, cookie in cookies.items() if not cookie]
-            if missing and len(missing) != len(PROVIDERS):
-                raise SyncError("live provider cookie is missing")
             if not self.docker.config_quiet():
                 raise SyncError("compose config validation failed")
             if not self.docker.recreate() or not self.docker.wait_healthy():
@@ -1901,9 +1997,14 @@ class SyncService:
                 # Do not probe provider endpoints with an empty Cookie.  The
                 # first valid candidate is promoted by apply() because its
                 # corresponding live value is absent.
-                self._set_bootstrap_status(state, cookies)
+                self._set_bootstrap_status(state, values)
             else:
                 for provider, cookie in cookies.items():
+                    if not cookie:
+                        continue
+                    if provider == "twitter" and "," in cookie:
+                        state["providers"][provider]["last_error"] = "twitter_token_pool_unsupported"
+                        continue
                     result = self.prober.probe(provider, cookie, full=True)
                     if not result.ok:
                         raise SyncError("rsshub bootstrap provider check failed")
@@ -1916,7 +2017,7 @@ class SyncService:
                     item["auth_failures"] = 0
                     item["transient_failures"] = 0
                     item["last_error"] = None
-                self._set_bootstrap_status(state, cookies)
+                self._set_bootstrap_status(state, values)
             state["compose"]["last_probe"] = "ok"
             state["compose"]["last_probe_at"] = self.clock.now()
             state["compose"]["last_recreate_at"] = self.clock.now()
@@ -2203,8 +2304,7 @@ def _extract_rsshub_environment(
             raise SyncError("configured service environment contains duplicate secret")
         if "$" in value or "{" in value:
             raise SyncError("compose secret uses interpolation; migrate it manually")
-        if key in COOKIE_KEYS.values():
-            validate_cookie_header(value)
+        validate_env_secret(key, value)
         extracted[key] = value
         replacements[index] = (" " * entry_indent) + "# migrated to " + managed_reference[2:] + "\n"
     return extracted, replacements
@@ -2980,7 +3080,8 @@ def main(argv: Optional[Sequence[str]] = None, stdin: Any = None) -> int:
             if stdin is not None or not sys.stdin.isatty():
                 raise InvalidInput("manual-update requires an interactive terminal")
             cookie_header = getpass.getpass(
-                f"{args.provider} Cookie（粘贴后按回车，内容不会回显）："
+                f"{args.provider} {'Auth Token' if args.provider == 'twitter' else 'Cookie'}"
+                "（粘贴后按回车，内容不会回显）："
             )
             result = service.apply(build_manual_update_request(args.provider, cookie_header))
             print(json.dumps(result, ensure_ascii=True, sort_keys=True))

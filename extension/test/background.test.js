@@ -36,6 +36,9 @@ async function waitFor(predicate, message, timeoutMs = 3000) {
 }
 
 function fakeCookie(provider) {
+  if (provider === 'twitter') {
+    return { name: 'auth_token', value: 'twitter-secret', domain: '.x.com', path: '/', secure: true, storeId: '0' };
+  }
   if (provider === 'zhihu') {
     return {
       name: 'z_c0',
@@ -128,7 +131,7 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
       onChanged: events.cookieChanged,
       getAll(details, callback) {
         cookieReads.push(structuredClone(details));
-        const provider = details.url.includes('zhihu') ? 'zhihu' : 'weibo';
+        const provider = details.url.includes('zhihu') ? 'zhihu' : details.url.includes('weibo') ? 'weibo' : 'twitter';
         callback([fakeCookie(provider)]);
       },
     },
@@ -190,10 +193,10 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     const initialMessages = fake.nativeMessages.length;
     fake.events.installed.dispatch({ reason: 'install' });
     await waitFor(
-      () => fake.nativeMessages.length >= initialMessages + 2,
-      'install should try both providers',
+      () => fake.nativeMessages.length >= initialMessages + 3,
+      'install should try all providers',
     );
-    assert.ok(fake.nativeMessages.length >= initialMessages + 2, 'install should try both providers');
+    assert.ok(fake.nativeMessages.length >= initialMessages + 3, 'install should try all providers');
     assert.ok(
       fake.permissionChecks.some(
         ({ origins }) => origins.includes('https://zhihu.com/*') && origins.includes('https://www.zhihu.com/*'),
@@ -210,18 +213,18 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     const afterInstall = fake.nativeMessages.length;
     fake.events.startup.dispatch();
     await waitFor(
-      () => fake.nativeMessages.length >= afterInstall + 2,
-      'startup should try both providers',
+      () => fake.nativeMessages.length >= afterInstall + 3,
+      'startup should try all providers',
     );
-    assert.ok(fake.nativeMessages.length >= afterInstall + 2, 'startup should try both providers');
+    assert.ok(fake.nativeMessages.length >= afterInstall + 3, 'startup should try all providers');
 
     const afterStartup = fake.nativeMessages.length;
     fake.events.alarm.dispatch({ name: 'rsshub-cookie-sync:periodic' });
     await waitFor(
-      () => fake.nativeMessages.length >= afterStartup + 2,
-      'periodic alarm should try both providers',
+      () => fake.nativeMessages.length >= afterStartup + 3,
+      'periodic alarm should try all providers',
     );
-    assert.ok(fake.nativeMessages.length >= afterStartup + 2, 'periodic alarm should try both providers');
+    assert.ok(fake.nativeMessages.length >= afterStartup + 3, 'periodic alarm should try all providers');
 
     const beforeDebounce = fake.nativeMessages.length;
     const debounceCreatesBeforeFirstEvent = fake.alarmCalls.filter(
@@ -276,6 +279,7 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     assert.equal(statusResponse.ok, true);
     assert.equal(statusResponse.providers.zhihu.lastResult, 'candidate_saved');
     assert.equal(statusResponse.providers.weibo.lastResult, 'candidate_saved');
+    assert.equal(statusResponse.providers.twitter.lastResult, 'candidate_saved');
     assert.equal(statusResponse.providers.zhihu.hash.length, 64);
 
     const beforeRefreshStatus = {
@@ -323,6 +327,7 @@ test('background lifecycle schedules install/startup/periodic/debounced sync saf
     const stored = JSON.stringify(fake.storage);
     assert.equal(stored.includes('zhihu-secret'), false);
     assert.equal(stored.includes('weibo-secret'), false);
+    assert.equal(stored.includes('twitter-secret'), false);
     assert.equal(stored.includes('cookieHeader'), false);
     assert.equal(stored.includes('cookieCount'), false);
   } finally {
@@ -511,6 +516,80 @@ test('连接设置输入非法时不会启动 Native Host', async () => {
     });
     assert.deepEqual(response, { ok: false, error: 'configuration_invalid' });
     assert.equal(fake.nativeMessages.length, before);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('Twitter prefers X, falls back without mixing, debounces auth_token and never stores credentials', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome();
+  const row = (domain, value) => ({ name: 'auth_token', domain, value, path: '/', secure: true });
+  let xRows = [row('.x.com', 'x-secret')];
+  fake.chrome.cookies.getAll = (details, callback) => {
+    fake.cookieReads.push(details);
+    callback(details.url === 'https://x.com/' ? xRows : [row('.twitter.com', 'legacy-secret')]);
+  };
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?twitter=${Date.now()}-${Math.random()}`);
+    await flush();
+    let response = await sendMessage(fake.events.message, { type: 'copy-cookie', provider: 'twitter' });
+    assert.equal(response.cookieHeader, 'auth_token=x-secret');
+    assert.deepEqual(fake.cookieReads.map((r) => r.url), ['https://x.com/']);
+    xRows = [];
+    response = await sendMessage(fake.events.message, { type: 'copy-cookie', provider: 'twitter' });
+    assert.equal(response.cookieHeader, 'auth_token=legacy-secret');
+    assert.deepEqual(fake.cookieReads.slice(-2).map((r) => r.url), ['https://x.com/', 'https://twitter.com/']);
+    xRows = [row('.x.com', 'one'), row('.x.com', 'two')];
+    const before = fake.cookieReads.length;
+    response = await sendMessage(fake.events.message, { type: 'copy-cookie', provider: 'twitter' });
+    assert.equal(response.ok, false);
+    assert.equal(fake.cookieReads.length, before + 1, 'ambiguous X must not silently use another account');
+    fake.setPermissionsGranted(false);
+    response = await sendMessage(fake.events.message, { type: 'copy-cookie', provider: 'twitter' });
+    assert.equal(response.error, 'permission_required');
+    assert.equal(fake.cookieReads.length, before + 1);
+    fake.setPermissionsGranted(true);
+    xRows = [row('.x.com', 'x-secret')];
+    const alarm = 'rsshub-cookie-sync:debounce:twitter';
+    fake.events.cookieChanged.dispatch({ cookie: row('.twitter.com', 'legacy-secret'), removed: true });
+    await waitFor(() => fake.alarmCalls.some((c) => c.name === alarm && c.operation === 'create'), 'Twitter change schedules debounce');
+    assert.equal(fake.nativeMessages.length, 0);
+    fake.events.alarm.dispatch({ name: alarm });
+    await waitFor(() => fake.nativeMessages.length === 1, 'Twitter debounce uploads once');
+    assert.deepEqual(fake.nativeMessages[0].payload.providers, { twitter: { cookieHeader: 'auth_token=x-secret' } });
+    assert.equal(JSON.stringify(fake.storage).includes('x-secret'), false);
+    assert.equal(JSON.stringify(fake.storage).includes('legacy-secret'), false);
+    assert.equal(JSON.stringify(fake.storage).includes('cookieHeader'), false);
+    assert.equal(fake.storage.rsshubCookieSyncState.providers.twitter.hash.length, 64);
+    const creates = fake.alarmCalls.length;
+    fake.events.cookieChanged.dispatch({ cookie: { ...row('.x.com', 'csrf'), name: 'ct0' } });
+    await flush();
+    assert.equal(fake.alarmCalls.length, creates);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('missing Twitter auth_token reads both domains but never uploads an empty credential', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome();
+  fake.chrome.cookies.getAll = (details, callback) => {
+    fake.cookieReads.push(details);
+    callback([{ name: 'ct0', value: 'csrf-only', domain: new URL(details.url).hostname, path: '/' }]);
+  };
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?twitter-missing=${Date.now()}-${Math.random()}`);
+    await flush();
+    fake.events.alarm.dispatch({ name: 'rsshub-cookie-sync:debounce:twitter' });
+    await flush();
+    assert.deepEqual(fake.cookieReads.map((row) => row.url), ['https://x.com/', 'https://twitter.com/']);
+    assert.equal(fake.nativeMessages.length, 0);
+    const status = await sendMessage(fake.events.message, { type: 'get-status' });
+    assert.equal(status.providers.twitter.lastResult, 'missing_cookie');
+    assert.equal(JSON.stringify(fake.storage).includes('csrf-only'), false);
   } finally {
     globalThis.chrome = previousChrome;
   }

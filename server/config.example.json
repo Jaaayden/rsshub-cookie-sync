@@ -11,7 +11,8 @@
     },
     "weibo": {
       "config_url": "https://m.weibo.cn/api/config"
-    }
+    },
+    "twitter": {}
   },
   "timeouts": {
     "provider_seconds": 20,

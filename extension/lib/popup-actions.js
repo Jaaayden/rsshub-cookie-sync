@@ -1,4 +1,4 @@
-import { PROVIDERS, validateCookieHeader } from './cookies.js';
+import { PROVIDERS, validateCookieHeader, validateTwitterHeader } from './cookies.js';
 
 /**
  * Actions shared by the popup UI.
@@ -78,6 +78,7 @@ export function createCookieCopyActions({
     }
 
     const label = providerLabel(provider);
+    const credentialLabel = provider === 'twitter' ? 'Auth Token' : 'Cookie';
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = '复制中…';
@@ -89,11 +90,11 @@ export function createCookieCopyActions({
       try {
         confirmed = confirmCopy(provider);
       } catch {
-        showNotice(`复制${label} Cookie 前的确认失败。`, 'error');
+        showNotice(`复制${label} ${credentialLabel} 前的确认失败。`, 'error');
         return false;
       }
       if (confirmed !== true) {
-        showNotice(`已取消复制${label} Cookie。`);
+        showNotice(`已取消复制${label} ${credentialLabel}。`);
         return false;
       }
 
@@ -106,7 +107,7 @@ export function createCookieCopyActions({
         permissionGranted = false;
       }
       if (permissionGranted !== true) {
-        showNotice(`未获得剪贴板权限，已取消复制${label} Cookie。`, 'error');
+        showNotice(`未获得剪贴板权限，已取消复制${label} ${credentialLabel}。`, 'error');
         return false;
       }
 
@@ -114,7 +115,7 @@ export function createCookieCopyActions({
       try {
         response = await sendMessage({ type: 'copy-cookie', provider });
       } catch {
-        showNotice(`读取${label} Cookie 失败，请重试。`, 'error');
+        showNotice(`读取${label} ${credentialLabel} 失败，请重试。`, 'error');
         return false;
       }
       if (
@@ -126,9 +127,9 @@ export function createCookieCopyActions({
         if (reason === 'permission_required') {
           showNotice(`请先授权${label}站点权限。`, 'error');
         } else if (reason === 'missing_cookie') {
-          showNotice(`未找到${label} Cookie，请先登录。`, 'error');
+          showNotice(`未找到${label} ${credentialLabel}，请先登录。`, 'error');
         } else {
-          showNotice(`读取${label} Cookie 失败，请重试。`, 'error');
+          showNotice(`读取${label} ${credentialLabel} 失败，请重试。`, 'error');
         }
         return false;
       }
@@ -137,14 +138,15 @@ export function createCookieCopyActions({
         // Validate before handing data to the clipboard writer.  The value is
         // never logged, rendered, or persisted by this action.
         validateCookieHeader(response.cookieHeader);
-        await writeClipboard(response.cookieHeader);
+        if (provider === 'twitter') validateTwitterHeader(response.cookieHeader);
+        await writeClipboard(provider === 'twitter' ? response.cookieHeader.slice('auth_token='.length) : response.cookieHeader);
       } catch {
-        showNotice(`复制${label} Cookie 失败，请检查剪贴板权限。`, 'error');
+        showNotice(`复制${label} ${credentialLabel} 失败，请检查剪贴板权限。`, 'error');
         return false;
       }
 
       showNotice(
-        `${label} Cookie 已复制。它等同于登录凭证，请勿粘贴到聊天或公开位置。`,
+        `${label} ${credentialLabel} 已复制。它等同于登录凭证，请勿粘贴到聊天或公开位置。`,
         'success',
       );
       return true;

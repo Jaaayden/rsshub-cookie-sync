@@ -3,7 +3,7 @@
 [![CI](https://github.com/Jaaayden/rsshub-cookie-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Jaaayden/rsshub-cookie-sync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Jaaayden/rsshub-cookie-sync)](https://github.com/Jaaayden/rsshub-cookie-sync/releases)
 
-RSSHub Cookie Sync 会把 Microsoft Edge 中已经登录的知乎、微博登录态同步到 RSSHub。它会定期检查登录态，在 Cookie 失效时使用已经验证过的新 Cookie 自动修复，并在需要人工登录时通过 Bark 提醒。
+RSSHub Cookie Sync 会把 Microsoft Edge 中已经登录的知乎、微博和 X/Twitter 登录态同步到 RSSHub。它会定期检查登录态，在 Cookie 失效时使用已经验证过的新 Cookie 自动修复，并在需要人工登录时通过 Bark 提醒。
 
 它不修改 RSSHub 源码、不需要 CookieCloud，也不会因为一段时间没有新文章就误报登录失效。
 
@@ -82,7 +82,7 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 - “SSH 密钥文件名”：选择 `rsshub-cookie-sync`；它必须与刚才粘贴并授权的 `.pub` 是一对；
 - “SSH 用户名”：只读显示为 `rsshub-sync`，不能改成 `root`。
 
-点击“保存连接设置”。再在同一个 Edge Default Profile 登录 `https://www.zhihu.com` 和 `https://m.weibo.cn`，点击“授权站点权限”，最后点击“立即同步”。如果弹窗显示刚才的旧结果，再点一次“刷新扩展状态”；重新读取网站登录态则使用“立即同步”。
+点击“保存连接设置”。再在同一个 Edge Default Profile 登录所需站点：`https://www.zhihu.com`、`https://m.weibo.cn` 和 `https://x.com`，点击“授权站点权限”，最后点击“立即同步”。如果弹窗显示刚才的旧结果，再点一次“刷新扩展状态”；重新读取网站登录态则使用“立即同步”。
 
 扩展设置页允许高级用户手动选择其他已有的 Ed25519，但安装器不会为它们创建或自动迁移配置。只有确认该密钥没有同时用于 `root` 或其他服务器时才应使用；普通安装始终使用项目专用的 `rsshub-cookie-sync`。
 
@@ -97,7 +97,7 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 | Compose 文件、project、service | 服务端安装器自动发现并让 Docker Compose 解析；非标准部署才手工指定 |
 | RSSHub 健康地址 | 默认 `http://127.0.0.1:1200`，普通安装不询问 |
 | Bark Device Key | 服务端交互输入，保存在 root-only 配置中 |
-| 知乎、微博 Cookie | 从 Edge 临时读取；live 值只保存在服务器的 root-only env 中 |
+| 知乎、微博 Cookie 及 X/Twitter Auth Token | 从 Edge 临时读取；live 值只保存在服务器的 root-only env 中 |
 
 `rsshub-sync` 是服务端安装器专门创建的固定受限账号，不是你的管理员账号，也不能获得普通 shell。固定账号名可以让 forced command 和权限边界保持一致；它不包含个人凭据。
 
@@ -117,9 +117,22 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 ```sh
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider zhihu
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider weibo
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
 在提示后粘贴并按回车，内容不会回显。这个入口不会直接改 Compose，而是走与自动同步相同的格式校验、上游验证、候选保存、必要时切换和失败回滚；终端输出也不会包含 Cookie。不要把 Cookie 写进命令参数。完成后按自己的系统策略清理剪贴板。
+
+## X/Twitter 同步与升级
+
+X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸值。手动入口 `manual-update --provider twitter` 的隐藏提示可接受裸值或单个 `auth_token=值`。服务器只把裸值写入 `TWITTER_AUTH_TOKEN`；浏览器里的其他 X Cookie 不会上传。
+
+扩展优先读取 `x.com`，没有 `auth_token` 时再读取 `twitter.com`。两个域不会混合；存在冲突令牌时停止本次采集。自动同步目前支持同一 Edge Default Profile 中的一个账号。
+
+升级到包含此功能的版本时，按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新同一版本的组件，然后重新加载扩展，点击“授权站点权限”授予新增的 X/Twitter 权限。源码版本使用各组件文档中的安装方式；尚未发布的代码不会通过 `releases/latest` 安装。旧组件仍只认识知乎和微博，所以不要仅更新扩展。
+
+已有知乎、微博配置和状态无需重建；没有 X 令牌时，服务端保持待同步，不发送 X 登录失效提醒。初始化允许只配置部分 provider。已有逗号分隔的多账号 `TWITTER_AUTH_TOKEN` 会原样保留，但不会自动接管；服务端状态报告 `twitter_token_pool_unsupported`。
+
+X 验证需要服务端直接访问 `x.com` 和 `api.x.com`，不会自动使用环境代理。验证接口失效、风控、限流或缺少临时 CSRF Cookie 时会稍后重试，保留现有 live 与候选，不会因主页能打开就认为登录有效。详见 [X/Twitter 故障排查](docs/troubleshooting.md#xtwitter)。
 
 ## Compose 会不会被修改？
 
@@ -254,11 +267,11 @@ python3 native-host/install.py --activate-dedicated-key
 - 客户端：macOS + Microsoft Edge Chromium + Edge Default Profile；
 - 服务端：Linux、systemd、Docker Engine、Docker Compose v2.30+；
 - 运行时只使用 Python 3.9+ 标准库；Node.js 仅用于扩展测试；
-- 服务端每 15 分钟检查 RSSHub、知乎和微博登录态；连续确认失效后才切换候选；
+- 服务端每 15 分钟检查 RSSHub、知乎、微博及已配置的 X/Twitter 登录态；连续确认失效后才切换候选；
 - `403`、`429`、`432`、超时和 `5xx` 会被当作临时上游故障，不会立即更换 Cookie；
 - 本项目不自动输入密码，不绕过验证码或 MFA。
 
-Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 Docker 管理权限的人可以读取它；这属于宿主机信任边界。浏览器扩展只申请两个站点的精确权限，不申请网页脚本注入或全站点权限。
+Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 Docker 管理权限的人可以读取它；这属于宿主机信任边界。浏览器扩展只申请知乎、微博、X/Twitter 的六个精确主机权限，不申请网页脚本注入或全站点权限。
 
 ## 开发、测试和打包
 

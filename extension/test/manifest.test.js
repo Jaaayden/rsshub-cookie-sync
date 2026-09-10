@@ -18,8 +18,10 @@ test('manifest requests only the intended APIs and exact optional cookie-domain 
   assert.deepEqual(manifest.optional_permissions, ['clipboardWrite']);
   assert.deepEqual([...manifest.optional_host_permissions].sort(), [
     'https://m.weibo.cn/*',
+    'https://twitter.com/*',
     'https://weibo.cn/*',
     'https://www.zhihu.com/*',
+    'https://x.com/*',
     'https://zhihu.com/*',
   ]);
   assert.equal(manifest.optional_host_permissions.some((origin) => origin.includes('*.')), false);

@@ -54,6 +54,15 @@ class NativeHostTests(unittest.TestCase):
             {"version": 1, "providers": providers}, separators=(",", ":")
         ).encode("utf-8")
 
+    def test_twitter_protocol_accepts_only_canonical_single_token(self):
+        header = "auth_token=synthetic-twitter-token"
+        self.assertEqual(native_host.validate_request(self.request(twitter={"cookieHeader": header})),
+                         {"twitter": {"cookieHeader": header}})
+        for value in ["bare-token", "auth_token=a,b", "auth_token=a; ct0=b", "auth_token=a; auth_token=b", "auth_token=", "auth_token=" + "a" * 4086]:
+            with self.subTest(value=value[:30]):
+                with self.assertRaises(native_host.ProtocolError):
+                    native_host.validate_request(self.request(twitter={"cookieHeader": value}))
+
     def test_native_frame_is_little_endian_and_supports_partial_reads(self) -> None:
         payload = b'{"version":1}'
         encoded = native_host.encode_frame(payload)

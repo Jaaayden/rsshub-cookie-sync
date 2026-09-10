@@ -92,10 +92,13 @@ python3 native-host/install.py --activate-dedicated-key
   "version": 1,
   "providers": {
     "zhihu": { "cookieHeader": "name=value; other=value" },
-    "weibo": { "cookieHeader": "name=value; other=value" }
+    "weibo": { "cookieHeader": "name=value; other=value" },
+    "twitter": { "cookieHeader": "auth_token=synthetic-token" }
   }
 }
 ```
+
+`twitter` 沿用协议 v1，但只接受单个 `auth_token=值`，不接受裸值、其他 Cookie 或多账号列表。服务端将它转换为 `TWITTER_AUTH_TOKEN` 的裸值。升级时先更新服务端，再更新 Native Host，最后重新加载扩展并授予新增权限。
 
 Cookie 只在浏览器 API 返回后、Native Host 内存中和 SSH 标准输入中短暂存在。它不会进入 SSH 参数、环境变量、Native Host 配置、扩展持久化存储或日志。服务器强制命令只返回以下状态之一：
 

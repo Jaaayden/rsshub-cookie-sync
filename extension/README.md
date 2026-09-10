@@ -2,7 +2,7 @@
 
 [返回项目总览](../README.md)
 
-这是 Microsoft Edge Manifest V3 扩展。它读取当前 Edge Default Profile 中适用于知乎、微博实际请求地址的 Cookie，通过本机 Native Host 发送到你自己的 RSSHub 服务器。
+这是 Microsoft Edge Manifest V3 扩展。它读取当前 Edge Default Profile 中适用于知乎、微博实际请求地址的 Cookie，以及 X/Twitter 的 `auth_token`，通过本机 Native Host 发送到你自己的 RSSHub 服务器。
 
 服务器地址、SSH 私钥和 Bark 配置不放在扩展代码或扩展存储中。服务器地址、SSH 端口和要使用的 SSH 文件名，可以在扩展的“连接设置”页保存到本机 Native Host。
 
@@ -24,19 +24,21 @@ git clone https://github.com/Jaaayden/rsshub-cookie-sync.git ~/rsshub-cookie-syn
 
 ## 第一次使用
 
-1. 在同一个 Edge 配置文件中登录 `https://www.zhihu.com` 和 `https://m.weibo.cn`。
-2. 打开扩展，点击“授权站点权限”，只授予知乎和微博的精确 host 权限。
+1. 在同一个 Edge 配置文件中登录所需站点：`https://www.zhihu.com`、`https://m.weibo.cn` 和 `https://x.com`。
+2. 打开扩展，点击“授权站点权限”，只授予知乎、微博和 X/Twitter 的精确 host 权限。
 3. 确认已经按 [Native Host 说明](../native-host/README.md) 安装本机桥接程序，并在扩展“连接设置”中填写服务器地址、端口和 SSH 密钥文件名。
 4. 点击“立即同步”。
 
 > 重要：普通安装应选择项目专用的 `rsshub-cookie-sync` 私钥，不会回退到 `id_ed25519` 等通用登录密钥。选择私钥不会自动授权；对应的 `~/.ssh/rsshub-cookie-sync.pub` 必须先通过管理员 SSH 连接安装到服务器的 `rsshub-sync` 账号。扩展日常连接使用的不是 `root`。
 
-扩展只读取以下两个请求 URL 适用的 Cookie：
+知乎、微博按以下请求 URL 采集 Cookie：
 
 ```text
 https://www.zhihu.com/api/v3/moments
 https://m.weibo.cn/feed/group
 ```
+
+X/Twitter 按 `https://x.com/` → `https://twitter.com/` 的顺序采集，仅上传单个 `auth_token`。X 没有令牌才会回退，读取失败或令牌冲突时停止；不会混合两个域的登录态。
 
 服务器会先验证候选。无效候选不会覆盖当前 live 配置；只有一方成功时，另一方也不会被清空。
 
@@ -54,13 +56,14 @@ https://m.weibo.cn/feed/group
 
 ### 复制 Cookie
 
-知乎和微博卡片各有一个“复制 Cookie”按钮。只有在你明确点击某个 provider 的按钮、确认安全警告并授权剪贴板后，扩展才会读取该 provider 的 Cookie 并复制到系统剪贴板。
+知乎和微博卡片各有一个“复制 Cookie”按钮，X/Twitter 卡片提供“复制 Auth Token”，只复制裸令牌。只有在你明确点击某个 provider 的按钮、确认安全警告并授权剪贴板后，扩展才会读取该 provider 的 Cookie 并复制到系统剪贴板。
 
 这是为应急手动替换保留的例外。复制后，以 root 登录 RSSHub 服务器并运行对应命令：
 
 ```sh
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider zhihu
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider weibo
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
 在隐藏提示中粘贴，不要把 Cookie 写进命令参数，也不要粘贴到聊天、Issue 或网页表单。服务端会继续执行验证、候选和回滚事务。扩展不会保存复制内容；剪贴板由操作系统管理，请在完成后清理。
@@ -96,12 +99,12 @@ https://m.weibo.cn/feed/group
 
 Manifest 申请：
 
-- `cookies`：读取两个目标请求的 Cookie；
+- `cookies`：读取目标站点 Cookie，X/Twitter 仅提取 `auth_token`；
 - `alarms`：定时同步和合并 Cookie 变化；
 - `nativeMessaging`：调用本机 Host；
 - `storage`：只保存启用开关、SHA-256 指纹、时间和固定结果码；
-- 可选 `clipboardWrite`：仅在用户明确执行“复制 Cookie”时使用；
-- 可选 host permissions：知乎、微博四个精确 host。
+- 可选 `clipboardWrite`：仅在用户明确执行复制操作时使用；
+- 可选 host permissions：知乎、微博、X/Twitter 六个精确 host。
 
 没有全站点权限、网页脚本注入权限或 `clipboardRead` 权限。扩展不会跨浏览器或跨 Edge Profile 读取 Cookie。
 

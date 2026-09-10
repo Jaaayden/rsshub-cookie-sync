@@ -1,7 +1,7 @@
-import { COOKIE_PERMISSION_ORIGINS } from './lib/cookies.js';
+import { COOKIE_PERMISSION_ORIGINS, PROVIDERS } from './lib/cookies.js';
 import { createCookieCopyActions, createPopupActions } from './lib/popup-actions.js';
 
-const PROVIDER_LABELS = Object.freeze({ zhihu: '知乎', weibo: '微博' });
+const PROVIDER_LABELS = Object.freeze({ zhihu: '知乎', weibo: '微博', twitter: 'X/Twitter' });
 const RESULT_LABELS = Object.freeze({
   unchanged: ['已同步', 'good'],
   candidate_saved: ['候选已保存', 'good'],
@@ -106,8 +106,9 @@ const copyActions = createCookieCopyActions({
   sendMessage,
   confirmCopy: (provider) => {
     const label = PROVIDER_LABELS[provider] ?? provider;
+    const credentialLabel = provider === 'twitter' ? 'Auth Token' : 'Cookie';
     return globalThis.confirm(
-      `Cookie 等同于 ${label} 登录凭证。复制后请只粘贴到可信位置，避免泄露。\n\n确定复制${label} Cookie？`,
+      `${credentialLabel} 等同于 ${label} 登录凭证。复制后请只粘贴到可信位置，避免泄露。\n\n确定复制${label} ${credentialLabel}？`,
     );
   },
   requestClipboardPermission,
@@ -159,8 +160,8 @@ function renderProvider(provider, value, granted) {
   const copyButton = document.createElement('button');
   copyButton.type = 'button';
   copyButton.className = 'copy-cookie secondary';
-  copyButton.textContent = '复制 Cookie';
-  copyButton.setAttribute('aria-label', `复制${PROVIDER_LABELS[provider] ?? provider} Cookie`);
+  copyButton.textContent = provider === 'twitter' ? '复制 Auth Token' : '复制 Cookie';
+  copyButton.setAttribute('aria-label', `复制${PROVIDER_LABELS[provider] ?? provider} ${provider === 'twitter' ? 'Auth Token' : 'Cookie'}`);
   copyButton.addEventListener('click', () => {
     void copyActions.copyProviderCookie(provider, copyButton);
   });
@@ -172,7 +173,7 @@ function renderProvider(provider, value, granted) {
 function renderStatus(status) {
   enabledElement.checked = status?.enabled !== false;
   providersElement.replaceChildren();
-  for (const provider of ['zhihu', 'weibo']) {
+  for (const provider of PROVIDERS) {
     providersElement.append(
       renderProvider(provider, status?.providers?.[provider], status?.permissions?.[provider] === true),
     );

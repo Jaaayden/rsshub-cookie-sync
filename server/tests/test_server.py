@@ -124,6 +124,10 @@ class FakeTransport:
             return HTTPResponse(200, b'{"code":200}')
         if path == "/healthz":
             return HTTPResponse(200, b"ok")
+        if url == "https://x.com/":
+            return HTTPResponse(200, b"", ("ct0=test-csrf; Domain=.x.com; Path=/; Secure",))
+        if url == "https://api.x.com/1.1/account/settings.json":
+            return HTTPResponse(200, b'{"screen_name":"tester"}')
         cookie = headers.get("Cookie", "")
         if path == "/api/v4/me":
             if "z_c0=new" in cookie:
@@ -751,7 +755,8 @@ class ServerTests(unittest.TestCase):
             [
                 ProbeResult("auth_failed", 401, "http_401"),
                 ProbeResult("transient", 429, "http_429"),
-                ProbeResult("ok", 200, "ok"),
+                ProbeResult("ok", 200, "ok"),  # Weibo
+                ProbeResult("ok", 200, "ok"),  # Twitter
                 ProbeResult("auth_failed", 401, "http_401"),
                 ProbeResult("ok", 200, "ok"),
                 ProbeResult("ok", 200, "ok"),
@@ -864,7 +869,8 @@ class ServerTests(unittest.TestCase):
         self.service.prober = ScriptedProber(
             [result for _ in range(4) for result in (
                 ProbeResult("transient", 429, "http_429"),
-                ProbeResult("ok", 200, "ok"),
+                ProbeResult("ok", 200, "ok"),  # Weibo
+                ProbeResult("ok", 200, "ok"),  # Twitter
             )]
         )
 

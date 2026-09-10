@@ -1,4 +1,4 @@
-import { PROVIDERS, validateCookieHeader } from './cookies.js';
+import { PROVIDERS, validateCookieHeader, validateTwitterHeader } from './cookies.js';
 
 export const PROTOCOL_VERSION = 1;
 export const NATIVE_HOST_NAME = 'com.jayden.rsshub_cookie_sync';
@@ -23,6 +23,7 @@ export function createSyncPayload(providerHeaders) {
     const header = providerHeaders[provider];
     if (header === undefined) continue;
     validateCookieHeader(header);
+    if (provider === 'twitter') validateTwitterHeader(header);
     providers[provider] = { cookieHeader: header };
   }
   if (Object.keys(providers).length === 0) {

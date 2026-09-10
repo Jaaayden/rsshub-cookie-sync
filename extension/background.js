@@ -1,5 +1,7 @@
 import {
   COOKIE_TARGETS,
+  TWITTER_URLS,
+  twitterCookieHeader,
   PROVIDERS,
   applicableCookies,
   serializeCookieHeader,
@@ -170,6 +172,18 @@ async function collectProvider(provider) {
   }
   if (!granted) return { error: 'permission_required' };
 
+  if (provider === 'twitter') {
+    for (const url of TWITTER_URLS) {
+      try {
+        const records = await callChrome(chromeContext().cookies.getAll, chromeContext().cookies, { url });
+        const header = twitterCookieHeader(records, new URL(url).hostname);
+        if (header) return { header };
+      } catch {
+        return { error: 'cookie_read_failed' };
+      }
+    }
+    return { error: 'missing_cookie' };
+  }
   let records;
   try {
     records = await callChrome(

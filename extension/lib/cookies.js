@@ -3,6 +3,28 @@
  * the Node test suite.  This module intentionally has no browser imports.
  */
 
+export const TWITTER_URLS = Object.freeze(['https://x.com/', 'https://twitter.com/']);
+
+export function validateTwitterHeader(header) {
+  if (typeof header !== 'string' || !/^auth_token=[A-Za-z0-9_-]+$/u.test(header) || header.length > 4096) {
+    throw new TypeError('invalid Twitter auth token');
+  }
+  return header;
+}
+
+export function twitterCookieHeader(cookies, host) {
+  const values = new Set(cookies.filter((cookie) =>
+    cookie.name === 'auth_token' && domainMatches(host, cookie.domain, cookie.hostOnly) &&
+    pathMatches('/', cookie.path) && !cookie.partitionKey &&
+    (cookie.session === true || cookie.expirationDate === undefined || cookie.expirationDate > Date.now() / 1000)
+  ).map((cookie) => cookie.value));
+  if (!values.size) return null;
+  if (values.size !== 1) throw new TypeError('ambiguous Twitter auth token');
+  const [token] = values;
+  if (typeof token !== 'string') throw new TypeError('invalid Twitter auth token');
+  return validateTwitterHeader(`auth_token=${token}`);
+}
+
 export const COOKIE_TARGETS = Object.freeze({
   zhihu: Object.freeze({
     url: 'https://www.zhihu.com/api/v3/moments',
@@ -21,6 +43,10 @@ export const COOKIE_TARGETS = Object.freeze({
       'https://weibo.cn/*',
       'https://m.weibo.cn/*',
     ]),
+  }),
+  twitter: Object.freeze({
+    url: TWITTER_URLS[0], host: 'x.com', path: '/',
+    permissionOrigins: Object.freeze(['https://x.com/*', 'https://twitter.com/*']),
   }),
 });
 
@@ -105,6 +131,11 @@ export function cookieAppliesToTarget(provider, cookie) {
     return false;
   }
   const target = getCookieTarget(provider);
+  if (provider === 'twitter') {
+    return cookie.name === 'auth_token' && !cookie.partitionKey &&
+      ['x.com', 'twitter.com'].some((host) => domainMatches(host, cookie.domain, cookie.hostOnly)) &&
+      pathMatches('/', cookie.path);
+  }
   const domain = typeof cookie.domain === 'string' ? cookie.domain : '';
   const host = target.host;
 
