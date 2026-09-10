@@ -124,6 +124,8 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 
 ## X/Twitter 同步与升级
 
+**已安装旧版？按 [从旧版本升级到 v1.2.0](docs/upgrade.md) 操作**：包含服务器和 Mac 更新命令、Edge 原目录替换、新增权限及升级结果检查。
+
 X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸值。手动入口 `manual-update --provider twitter` 的隐藏提示可接受裸值或单个 `auth_token=值`。服务器只把裸值写入 `TWITTER_AUTH_TOKEN`；浏览器里的其他 X Cookie 不会上传。
 
 扩展优先读取 `x.com`，没有 `auth_token` 时再读取 `twitter.com`。两个域不会混合；存在冲突令牌时停止本次采集。自动同步目前支持同一 Edge Default Profile 中的一个账号。
