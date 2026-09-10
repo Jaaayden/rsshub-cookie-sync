@@ -11,6 +11,7 @@ import {
   NATIVE_HOST_NAME,
   createSyncPayload,
   sanitizeHostResult,
+  sanitizeDiagnosticLog,
 } from './lib/protocol.js';
 import {
   createGetNativeConfigMessage,
@@ -263,7 +264,44 @@ function localFailureResult(reason) {
   return { status: 'retryable_error', reason };
 }
 
+const DIAGNOSTIC_KEY = 'rsshubCookieSyncDiagnostics';
+let diagnosticQueue = Promise.resolve();
+
+async function readDiagnostics() {
+  const stored = await callChrome(chromeContext().storage.local.get, chromeContext().storage.local, DIAGNOSTIC_KEY);
+  return sanitizeDiagnosticLog(stored?.[DIAGNOSTIC_KEY]);
+}
+
+function updateDiagnostics(update) {
+  const run = diagnosticQueue.then(async () => {
+    const entries = update(await readDiagnostics());
+    await callChrome(chromeContext().storage.local.set, chromeContext().storage.local, { [DIAGNOSTIC_KEY]: sanitizeDiagnosticLog(entries) });
+  });
+  diagnosticQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function logDiagnostic(entry) {
+  try {
+    await updateDiagnostics((entries) => [...entries, { ...entry, time: Date.now() }]);
+  } catch {
+    // Diagnostic storage failure must not prevent credential sync.
+  }
+}
+
 async function performProviderSync(provider, reason) {
+  const started = Date.now();
+  const trigger = reason === 'manual' ? 'manual' : 'automatic';
+  await logDiagnostic({ provider, trigger, stage: 'collect', status: 'started' });
+  try {
+    return await performProviderSyncInternal(provider, reason);
+  } finally {
+    const result = state.providers[provider];
+    await logDiagnostic({ provider, trigger, stage: 'complete', status: result.lastResult ?? 'retryable_error', reason: result.lastReason, durationMs: Date.now() - started });
+  }
+}
+
+async function performProviderSyncInternal(provider, reason) {
   const now = Date.now();
   const collection = await collectProvider(provider);
   if (collection.error) {
@@ -287,7 +325,8 @@ async function performProviderSync(provider, reason) {
 
   let response;
   try {
-    const payload = createSyncPayload({ [provider]: collection.header });
+    await logDiagnostic({ provider, trigger: reason === 'manual' ? 'manual' : 'automatic', stage: 'native', status: 'started' });
+    const payload = { ...createSyncPayload({ [provider]: collection.header }), diagnostics: true };
     response = await sendNativePayload(payload);
   } catch {
     await recordProvider(provider, {
@@ -325,11 +364,11 @@ function automaticSync(reason, providers = PROVIDERS) {
   });
 }
 
-function manualSync() {
+function manualSync(providers = PROVIDERS) {
   return enqueueSync(async () => {
     await loadState();
     const result = {};
-    for (const provider of PROVIDERS) {
+    for (const provider of providers) {
       result[provider] = await performProviderSync(provider, 'manual');
     }
     return result;
@@ -424,6 +463,16 @@ async function handleMessage(message) {
       return setNativeConfig(message.config);
     case 'copy-cookie':
       return cookieForCopy(message.provider);
+    case 'get-diagnostics':
+      await diagnosticQueue;
+      return { ok: true, entries: await readDiagnostics() };
+    case 'clear-diagnostics':
+      await updateDiagnostics(() => []);
+      return { ok: true };
+    case 'sync-provider':
+      if (!PROVIDERS.includes(message.provider)) return { ok: false, error: 'invalid_provider' };
+      await manualSync([message.provider]);
+      return { ok: true, ...(await getStatus()) };
     case 'sync-now':
       await manualSync();
       return { ok: true, ...(await getStatus()) };

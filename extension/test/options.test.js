@@ -37,5 +37,6 @@ test('Popup 提供连接设置入口', async () => {
   assert.match(html, /id="settings"/);
   assert.match(source, /settingsButton\.addEventListener\('click'/);
   assert.match(source, /runtime\.openOptionsPage\(\)/);
-  assert.match(source, /\.pub 公钥安装到服务器的 rsshub-sync 账号/);
+  assert.doesNotMatch(source, /若刚更换 SSH 密钥/);
+  assert.match(source, /syncSummary/);
 });

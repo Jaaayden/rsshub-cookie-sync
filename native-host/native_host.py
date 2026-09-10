@@ -509,12 +509,15 @@ def encode_frame(payload: bytes) -> bytes:
     return struct.pack("<I", len(payload)) + payload
 
 
-def write_status(stream: BinaryIO, status: str) -> None:
+def write_status(stream: BinaryIO, status: str, diagnostic: Optional[Dict[str, str]] = None) -> None:
     """Write the intentionally minimal response understood by the extension."""
 
     if status not in ALLOWED_REMOTE_STATUSES:
         status = "retryable_error"
-    payload = json.dumps({"status": status}, separators=(",", ":")).encode("ascii")
+    response = {"status": status}
+    if diagnostic and safe_diagnostic_reason(diagnostic.get("reason")):
+        response["reason"] = diagnostic["reason"]
+    payload = json.dumps(response, separators=(",", ":")).encode("ascii")
     stream.write(encode_frame(payload))
     flush = getattr(stream, "flush", None)
     if callable(flush):
@@ -579,7 +582,7 @@ def validate_request(raw: bytes) -> Dict[str, Dict[str, str]]:
         raise ProtocolError("invalid request JSON") from exc
     if not isinstance(message, dict):
         raise ProtocolError("request must be an object")
-    if set(message) != {"version", "providers"}:
+    if set(message) not in ({"version", "providers"}, {"version", "providers", "diagnostics"}) or ("diagnostics" in message and message["diagnostics"] is not True):
         raise ProtocolError("unknown request field")
     version = message.get("version")
     if type(version) is not int or version != 1:
@@ -610,7 +613,21 @@ def _request_bytes(providers: Mapping[str, Mapping[str, str]]) -> bytes:
     return json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def parse_remote_status(output: bytes) -> Optional[str]:
+DIAGNOSTIC_REASONS = frozenset((
+    "host_configuration_invalid", "ssh_timeout", "ssh_auth_failed", "ssh_host_key_failed",
+    "ssh_connection_failed", "server_error", "remote_invalid_response", "candidate_invalid",
+    "upstream_temporary_failure", "network_error", "twitter_csrf_missing", "twitter_invalid_response",
+    "twitter_auth_failed", "twitter_token_pool_unsupported", "profile_missing", "profile_unauthorized",
+    "moments_invalid_json", "moments_unauthorized", "config_invalid_json", "config_unauthorized",
+    "config_not_ok", "config_logged_out", "invalid_cookie",
+))
+
+
+def safe_diagnostic_reason(value: Any) -> bool:
+    return isinstance(value, str) and (value in DIAGNOSTIC_REASONS or re.fullmatch(r"http_[1-5][0-9]{2}", value) is not None)
+
+
+def parse_remote_status(output: bytes, diagnostic: Optional[Dict[str, str]] = None) -> Optional[str]:
     """Extract only an allow-listed status from the forced command output."""
 
     if not isinstance(output, bytes) or not output or len(output) > 64 * 1024:
@@ -625,8 +642,10 @@ def parse_remote_status(output: bytes) -> Optional[str]:
         return None
     if not isinstance(value, dict):
         return None
-    if set(value) != {"status"}:
+    if set(value) != {"status"} and not (diagnostic is not None and set(value) == {"status", "reason"}):
         return None
+    if diagnostic is not None and safe_diagnostic_reason(value.get("reason")):
+        diagnostic["reason"] = value["reason"]
     status = value.get("status")
     if isinstance(status, str) and status in ALLOWED_REMOTE_STATUSES:
         return status
@@ -638,6 +657,7 @@ def send_to_server(
     config: HostConfig,
     *,
     runner: Any = subprocess.run,
+    diagnostic: Optional[Dict[str, str]] = None,
 ) -> str:
     """Send one validated request to the forced SSH command.
 
@@ -649,6 +669,8 @@ def send_to_server(
     try:
         validate_runtime_files(config)
         payload = _request_bytes(providers)
+        if diagnostic is not None:
+            payload = json.dumps({"version": 1, "providers": providers, "diagnostics": True}, separators=(",", ":")).encode("utf-8")
         # Do not inherit proxy variables, SSH agent handles, locale hooks, or
         # any unrelated browser environment.  In particular, cookie headers
         # are never represented in this mapping; they exist only in ``input``.
@@ -673,8 +695,15 @@ def send_to_server(
             list(build_ssh_argv(config)),
             **runner_kwargs,
         )
+    except ConfigurationError:
+        if diagnostic is not None:
+            diagnostic["reason"] = "host_configuration_invalid"
+        return "retryable_error"
+    except subprocess.TimeoutExpired:
+        if diagnostic is not None:
+            diagnostic["reason"] = "ssh_timeout"
+        return "retryable_error"
     except (
-        ConfigurationError,
         OSError,
         ProtocolError,
         UnicodeError,
@@ -682,21 +711,35 @@ def send_to_server(
         subprocess.SubprocessError,
         TimeoutError,
     ):
+        if diagnostic is not None:
+            diagnostic["reason"] = "ssh_connection_failed"
         return "retryable_error"
 
     returncode = getattr(result, "returncode", 1)
     if returncode != 0:
+        if diagnostic is not None:
+            # Inspect bounded stderr only in memory; never return or log its text.
+            stderr = getattr(result, "stderr", b"")
+            stderr = stderr[:8192].lower() if isinstance(stderr, bytes) else b""
+            reason = "server_error" if returncode != 255 else "ssh_connection_failed"
+            if returncode == 255 and b"permission denied (publickey" in stderr:
+                reason = "ssh_auth_failed"
+            elif returncode == 255 and (b"host key verification failed" in stderr or b"remote host identification has changed" in stderr):
+                reason = "ssh_host_key_failed"
+            diagnostic["reason"] = reason
         return "retryable_error"
-    status = parse_remote_status(getattr(result, "stdout", b""))
+    status = parse_remote_status(getattr(result, "stdout", b""), diagnostic)
+    if diagnostic is not None and not status:
+        diagnostic["reason"] = "remote_invalid_response"
     return status or "retryable_error"
 
 
-def process_request(raw: bytes, config: HostConfig, *, runner: Any = subprocess.run) -> str:
+def process_request(raw: bytes, config: HostConfig, *, runner: Any = subprocess.run, diagnostic: Optional[Dict[str, str]] = None) -> str:
     try:
         providers = validate_request(raw)
     except ProtocolError:
         return "rejected_invalid"
-    return send_to_server(providers, config, runner=runner)
+    return send_to_server(providers, config, runner=runner, diagnostic=diagnostic)
 
 
 def _parse_json_object(raw: bytes) -> Dict[str, Any]:
@@ -1198,12 +1241,19 @@ def run_host(
                 return 2
             continue
 
+        try:
+            wants_diagnostic = _parse_json_object(frame).get("diagnostics") is True
+        except ProtocolError:
+            wants_diagnostic = False
+        diagnostic = {} if wants_diagnostic else None
         if config is None:
             status = "retryable_error"
+            if diagnostic is not None:
+                diagnostic["reason"] = "host_configuration_invalid"
         else:
-            status = process_request(frame, config, runner=runner)
+            status = process_request(frame, config, runner=runner, diagnostic=diagnostic)
         try:
-            write_status(out_stream, status)
+            write_status(out_stream, status, diagnostic)
         except (BrokenPipeError, OSError):
             _safe_stderr(err_stream, "write_failed")
             return 2

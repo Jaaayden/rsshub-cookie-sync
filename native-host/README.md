@@ -85,7 +85,7 @@ python3 native-host/install.py --activate-dedicated-key
 
 ## Native Messaging 数据流
 
-扩展使用 Chromium Native Messaging 的 4 字节 little-endian 长度帧。同步请求的形状固定为：
+扩展使用 Chromium Native Messaging 的 4 字节 little-endian 长度帧。同步请求的基础形状为：
 
 ```json
 {
@@ -176,3 +176,5 @@ python3 -B -m unittest discover -s native-host -p 'test_*.py' -v
 ```
 
 测试不会连接真实服务器、读取浏览器 Cookie 或使用真实私钥。
+
+诊断请求可额外携带 `diagnostics: true`，需要三端同时升级。Host 只返回白名单中的 `reason`，SSH stderr 仅在内存中匹配固定错误类别，不转发原文；不携带该选项的请求仍返回原有 status-only 结果。

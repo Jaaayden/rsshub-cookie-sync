@@ -54,6 +54,43 @@ class NativeHostTests(unittest.TestCase):
             {"version": 1, "providers": providers}, separators=(",", ":")
         ).encode("utf-8")
 
+    def test_native_loop_forwards_opt_in_diagnostic_reason(self):
+        raw = json.dumps({"version": 1, "diagnostics": True, "providers": {"twitter": {"cookieHeader": "auth_token=synthetic"}}}).encode()
+        output = io.BytesIO()
+        runner = mock.Mock(return_value=CompletedProcess([], 0, b'{"status":"retryable_error","reason":"twitter_csrf_missing"}', b"SECRET"))
+        with mock.patch.object(native_host, "load_config", return_value=self.config):
+            native_host.run_host(config_path=Path("unused"), stdin=io.BytesIO(native_host.encode_frame(raw)), stdout=output, stderr=io.StringIO(), runner=runner)
+        output.seek(0)
+        self.assertEqual(json.loads(native_host.read_frame(output)), {"status": "retryable_error", "reason": "twitter_csrf_missing"})
+
+    def test_opt_in_diagnostics_classifies_transport_without_exposing_stderr(self):
+        cases = [
+            (255, b"Permission denied (publickey). SECRET", b"", "ssh_auth_failed"),
+            (255, b"Host key verification failed. SECRET", b"", "ssh_host_key_failed"),
+            (255, b"Connection refused SECRET", b"", "ssh_connection_failed"),
+            (75, b"SECRET", b"", "server_error"),
+            (0, b"SECRET", b'{"status":"retryable_error","reason":"http_403"}', "http_403"),
+            (0, b"SECRET", b"SECRET", "remote_invalid_response"),
+        ]
+        for code, stderr, stdout, reason in cases:
+            with self.subTest(reason=reason):
+                runner = mock.Mock(return_value=CompletedProcess([], code, stdout, stderr))
+                diagnostic = {}
+                status = native_host.send_to_server({"twitter": {"cookieHeader": "auth_token=synthetic"}}, self.config, runner=runner, diagnostic=diagnostic)
+                self.assertEqual(status, "retryable_error")
+                self.assertEqual(diagnostic, {"reason": reason})
+                self.assertTrue(json.loads(runner.call_args.kwargs["input"])["diagnostics"])
+                output = io.BytesIO()
+                native_host.write_status(output, status, diagnostic)
+                self.assertNotIn(b"SECRET", output.getvalue())
+        diagnostic = {}
+        native_host.send_to_server({"twitter": {"cookieHeader": "auth_token=synthetic"}}, self.config,
+            runner=mock.Mock(side_effect=native_host.subprocess.TimeoutExpired("ssh", 1)), diagnostic=diagnostic)
+        self.assertEqual(diagnostic, {"reason": "ssh_timeout"})
+        diagnostic = {}
+        native_host.parse_remote_status(b'{"status":"retryable_error","reason":"SECRET"}', diagnostic)
+        self.assertEqual(diagnostic, {})
+
     def test_twitter_protocol_accepts_only_canonical_single_token(self):
         header = "auth_token=synthetic-twitter-token"
         self.assertEqual(native_host.validate_request(self.request(twitter={"cookieHeader": header})),

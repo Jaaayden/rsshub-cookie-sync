@@ -430,7 +430,7 @@ def strict_json_from_stdin(stream: Any = None, max_bytes: int = MAX_INPUT_BYTES)
         raise InvalidInput("request is not valid JSON") from exc
     if not isinstance(value, dict):
         raise InvalidInput("request must be a JSON object")
-    if set(value) != {"version", "providers"}:
+    if set(value) not in ({"version", "providers"}, {"version", "providers", "diagnostics"}) or ("diagnostics" in value and value["diagnostics"] is not True):
         raise InvalidInput("request has unexpected fields")
     if type(value.get("version")) is not int or value.get("version") != 1:
         raise InvalidInput("unsupported request version")
@@ -1736,7 +1736,7 @@ class SyncService:
             raise TransactionError("promotion failed and rollback was attempted") from exc
 
     def apply(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict) or set(payload) != {"version", "providers"}:
+        if not isinstance(payload, dict) or set(payload) not in ({"version", "providers"}, {"version", "providers", "diagnostics"}) or ("diagnostics" in payload and payload["diagnostics"] is not True):
             raise InvalidInput("request has unexpected fields")
         # Reuse the same validation rules for callers that already decoded JSON.
         providers = payload.get("providers")
@@ -1763,15 +1763,18 @@ class SyncService:
             state = load_state(self.config.state_file)
             live_data, live_values = self._read_live()
             results: Dict[str, str] = {}
+            reasons: Dict[str, str] = {}
             to_promote: Dict[str, str] = {}
             for provider in invalid_providers:
                 results[provider] = "rejected_invalid"
             for provider, cookie in cookie_values.items():
                 if provider == "twitter" and "," in live_values.get("TWITTER_AUTH_TOKEN", ""):
                     state["providers"][provider]["last_error"] = "twitter_token_pool_unsupported"
+                    reasons[provider] = "twitter_token_pool_unsupported"
                     results[provider] = "rejected_invalid"
                     continue
                 result = self.prober.probe(provider, cookie, full=True)
+                reasons[provider] = _safe_error_code(result.reason) or "upstream_temporary_failure"
                 if result.kind == "auth_failed":
                     results[provider] = "rejected_invalid"
                     continue
@@ -1839,7 +1842,11 @@ class SyncService:
             # vocabulary rather than an unbounded per-provider response.
             for status in ("promoted", "candidate_saved", "unchanged", "rejected_invalid", "retryable_error"):
                 if status in results.values():
-                    return {"status": status}
+                    response = {"status": status}
+                    if payload.get("diagnostics") and status in ("retryable_error", "rejected_invalid"):
+                        failed = next(p for p, value in results.items() if value == status)
+                        response["reason"] = reasons.get(failed, "candidate_invalid" if status == "rejected_invalid" else "server_error")
+                    return response
             return {"status": "retryable_error"}
 
     def _maybe_full_probe(self, provider: str, cookie: str, item: Mapping[str, Any]) -> Tuple[ProbeResult, bool]:

@@ -158,3 +158,13 @@ export function createCookieCopyActions({
 
   return Object.freeze({ copyProviderCookie });
 }
+
+export function syncSummary(providers, requested = PROVIDERS) {
+  const accepted = new Set(['unchanged', 'candidate_saved', 'promoted']);
+  const succeeded = requested.filter((provider) => accepted.has(providers?.[provider]?.lastResult)).length;
+  if (succeeded === requested.length && requested.length > 0) return { text: '本次同步处理完成，是否切换请看各站点结果。', kind: 'success' };
+  return {
+    text: succeeded > 0 ? `部分完成：${succeeded}/${requested.length} 个站点已处理，其余请单独重试或查看诊断日志。` : '本次同步未完成，请查看各站点状态和诊断日志。',
+    kind: 'error',
+  };
+}

@@ -1,5 +1,7 @@
 import { COOKIE_PERMISSION_ORIGINS, PROVIDERS } from './lib/cookies.js';
-import { createCookieCopyActions, createPopupActions } from './lib/popup-actions.js';
+import { createCookieCopyActions, createPopupActions, syncSummary } from './lib/popup-actions.js';
+
+import { diagnosticReasonLabel, sanitizeDiagnosticLog } from './lib/protocol.js';
 
 const PROVIDER_LABELS = Object.freeze({ zhihu: '知乎', weibo: '微博', twitter: 'X/Twitter' });
 const RESULT_LABELS = Object.freeze({
@@ -131,12 +133,6 @@ function formatTime(value) {
   }
 }
 
-function statusLabel(result, reason) {
-  const [label] = RESULT_LABELS[result] ?? ['待同步', 'warning'];
-  const reasonLabel = REASON_LABELS[reason];
-  return reasonLabel ? `${label} · ${reasonLabel}` : label;
-}
-
 function renderProvider(provider, value, granted) {
   const card = document.createElement('article');
   card.className = 'provider';
@@ -150,12 +146,12 @@ function renderProvider(provider, value, granted) {
   const [label, tone] = RESULT_LABELS[result] ?? ['待同步', 'warning'];
   const badge = document.createElement('span');
   badge.className = `badge ${tone}`;
-  badge.textContent = statusLabel(result, reason);
+  badge.textContent = label;
 
   const meta = document.createElement('div');
   meta.className = 'provider-meta';
   const hash = typeof value?.hash === 'string' ? `指纹 ${value.hash.slice(0, 12)}…` : '尚无指纹';
-  meta.textContent = `${granted ? '权限已授予' : '权限未授予'} · ${hash} · ${formatTime(value?.lastSyncAt)}`;
+  meta.textContent = `${granted ? '权限已授予' : '权限未授予'} · ${hash} · 最近尝试 ${formatTime(value?.lastSyncAt)}`;
 
   const copyButton = document.createElement('button');
   copyButton.type = 'button';
@@ -166,7 +162,21 @@ function renderProvider(provider, value, granted) {
     void copyActions.copyProviderCookie(provider, copyButton);
   });
 
-  card.append(name, badge, meta, copyButton);
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'secondary';
+  retryButton.textContent = '重试此站点';
+  retryButton.setAttribute('aria-label', `重试${PROVIDER_LABELS[provider]}`);
+  retryButton.addEventListener('click', () => { void runSync(provider); });
+  retryButton.disabled = syncing;
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+  actions.append(retryButton, copyButton);
+  const detail = document.createElement('div');
+  detail.className = 'provider-meta';
+  detail.textContent = reason ? (REASON_LABELS[reason] ?? diagnosticReasonLabel(reason)) :
+    (result === 'retryable_error' ? '未返回具体原因，请展开诊断日志。' : '');
+  card.append(name, badge, meta, detail, actions);
   return card;
 }
 
@@ -199,7 +209,8 @@ grantButton.addEventListener('click', async () => {
     showNotice('权限已授予，正在同步…');
     const response = await sendMessage({ type: 'sync-now' });
     if (!response?.ok) throw new Error('sync_failed');
-    showNotice('同步请求已发送。', 'success');
+    const summary = syncSummary(response.providers);
+    showNotice(summary.text, summary.kind);
   } catch {
     showNotice('权限请求失败，请重试。', 'error');
   } finally {
@@ -210,32 +221,30 @@ grantButton.addEventListener('click', async () => {
   }
 });
 
-syncButton.addEventListener('click', async () => {
+let syncing = false;
+async function runSync(provider) {
+  if (syncing) return;
+  syncing = true;
   syncButton.disabled = true;
-  showNotice('正在读取并同步 Cookie…');
+  document.querySelectorAll('.provider-actions button').forEach((button) => { button.disabled = true; });
+  showNotice(provider ? `正在重试${PROVIDER_LABELS[provider]}…` : '正在读取并同步 Cookie…');
   try {
-    const response = await sendMessage({ type: 'sync-now' });
+    const response = await sendMessage(provider ? { type: 'sync-provider', provider } : { type: 'sync-now' });
     if (!response?.ok) throw new Error('sync_failed');
-    // Read the state again after the upload finishes so the popup reflects
-    // the background's persisted result, including concurrent alarm changes.
-    await refresh();
-    const results = Object.values(response.providers ?? {}).map((value) => value?.lastResult);
-    if (results.includes('retryable_error')) {
-      showNotice(
-        '同步未完成。若刚更换 SSH 密钥，请先把对应 .pub 公钥安装到服务器的 rsshub-sync 账号。',
-        'error',
-      );
-    } else if (results.some((value) => ['rejected_invalid', 'missing_cookie', 'permission_required'].includes(value))) {
-      showNotice('同步未完成，请按服务卡片中的状态处理。', 'error');
-    } else {
-      showNotice('同步完成。', 'success');
-    }
+    renderStatus(response);
+    const summary = syncSummary(response.providers, provider ? [provider] : PROVIDERS);
+    showNotice(summary.text, summary.kind);
   } catch {
-    showNotice('同步失败，请检查站点权限或 Native Host。', 'error');
+    showNotice('无法完成同步请求，请查看诊断日志和 Native Host 状态。', 'error');
   } finally {
+    syncing = false;
     syncButton.disabled = false;
+    document.querySelectorAll('.provider-actions button').forEach((button) => { button.disabled = false; });
+    if (document.querySelector('#diagnostics').open) await loadDiagnostics();
   }
-});
+}
+
+syncButton.addEventListener('click', () => { void runSync(); });
 
 refreshButton.addEventListener('click', () => {
   void refreshFromButton(refreshButton);
@@ -268,3 +277,44 @@ enabledElement.addEventListener('change', async () => {
 });
 
 void refresh();
+
+const logOutput = document.querySelector('#diagnostic-output');
+const logNotice = document.querySelector('#diagnostic-notice');
+const stageLabels = { collect: '采集', native: '上传及服务端处理', complete: '完成' };
+async function loadDiagnostics() {
+  try {
+    const response = await sendMessage({ type: 'get-diagnostics' });
+    if (!response?.ok) throw new Error('unavailable');
+    const entries = sanitizeDiagnosticLog(response.entries);
+    logOutput.textContent = entries.length ? entries.slice().reverse().map((entry) =>
+      `${new Date(entry.time).toLocaleString()} · ${PROVIDER_LABELS[entry.provider]} · ${entry.trigger === 'manual' ? '手动' : '自动'}\n${stageLabels[entry.stage]} / ${RESULT_LABELS[entry.status]?.[0] ?? (entry.status === 'started' ? '开始' : entry.status)}${entry.durationMs === null ? '' : ` / ${entry.durationMs}ms`}${entry.stage === 'complete' && entry.reason ? `\n${REASON_LABELS[entry.reason] ?? diagnosticReasonLabel(entry.reason)}` : ''}${entry.stage === 'complete' && entry.status === 'retryable_error' && !entry.reason ? '\n未返回具体原因，请确认 Host 和服务端均已升级。' : ''}`
+    ).join('\n\n') : '暂无日志。点击某个站点的“重试此站点”后再刷新。';
+    logNotice.textContent = `最近 ${entries.length} 条记录（最多 200 条）。`;
+    return entries;
+  } catch {
+    logNotice.textContent = '无法读取诊断日志，请重新加载扩展后重试。';
+    return null;
+  }
+}
+document.querySelector('#diagnostics').addEventListener('toggle', (event) => {
+  if (event.target.open) void loadDiagnostics();
+});
+document.querySelector('#diagnostic-refresh').addEventListener('click', () => { void loadDiagnostics(); });
+document.querySelector('#diagnostic-clear').addEventListener('click', async () => {
+  try {
+    const response = await sendMessage({ type: 'clear-diagnostics' });
+    if (!response?.ok) throw new Error('unavailable');
+    await loadDiagnostics();
+  } catch { logNotice.textContent = '清空日志失败，请重试。'; }
+});
+document.querySelector('#diagnostic-export').addEventListener('click', async () => {
+  const entries = await loadDiagnostics();
+  if (entries === null) return;
+  const blob = new Blob([JSON.stringify({ version: 1, extensionVersion: chrome.runtime.getManifest().version, entries }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'rsshub-cookie-sync-diagnostics.json';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});

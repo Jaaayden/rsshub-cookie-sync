@@ -170,3 +170,10 @@ button.primary:hover { background: var(--primary-strong); }
 .switch input:checked + .slider { background: var(--primary); }
 .switch input:checked + .slider::after { transform: translateX(16px); }
 .switch input:focus-visible + .slider { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.provider-actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.provider-actions .copy-cookie { margin: 0; }
+#diagnostics { margin-top: 16px; font-size: 12px; }
+#diagnostics summary { cursor: pointer; font-weight: 600; }
+#diagnostics p { color: var(--muted); line-height: 1.5; }
+#diagnostic-output { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }

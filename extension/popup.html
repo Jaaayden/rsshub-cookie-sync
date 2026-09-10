@@ -11,7 +11,7 @@
       <header class="header">
         <div>
           <h1>RSSHub Cookie Sync</h1>
-          <p class="subtitle">知乎 · 微博登录态同步</p>
+          <p class="subtitle">知乎 · 微博 · X/Twitter 登录态同步</p>
         </div>
         <label class="switch" title="启用或暂停自动同步">
           <input id="enabled" type="checkbox" aria-label="启用自动同步">
@@ -33,6 +33,17 @@
         <button id="settings" class="secondary" type="button">连接设置</button>
       </div>
 
+      <details id="diagnostics">
+        <summary>诊断日志</summary>
+        <p>记录每个站点的采集、上传与处理结果，不记录 Cookie、令牌、服务器地址或 SSH 输出。</p>
+        <div class="actions">
+          <button id="diagnostic-refresh" class="secondary" type="button">刷新日志</button>
+          <button id="diagnostic-export" class="secondary" type="button">导出日志</button>
+          <button id="diagnostic-clear" class="secondary" type="button">清空日志</button>
+        </div>
+        <p id="diagnostic-notice" role="status"></p>
+        <pre id="diagnostic-output"></pre>
+      </details>
       <p class="privacy">同步时 Cookie 只在内存中传递；仅在你点击“复制 Cookie”时才会写入剪贴板。扩展不会持久化 Cookie。</p>
     </main>
     <script type="module" src="popup.js"></script>

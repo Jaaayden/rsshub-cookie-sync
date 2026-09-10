@@ -1,5 +1,5 @@
 import { PROVIDERS } from './cookies.js';
-import { HOST_RESULT_STATUSES, sanitizeHostResult } from './protocol.js';
+import { HOST_RESULT_STATUSES, sanitizeHostResult, sanitizeReason } from './protocol.js';
 
 export const DEFAULT_DEBOUNCE_MS = 2 * 60 * 1000;
 export const PERIODIC_SYNC_MINUTES = 15;
@@ -52,7 +52,7 @@ function safeResult(value) {
 }
 
 function safeReason(value) {
-  return typeof value === 'string' && SAFE_REASONS.has(value) ? value : null;
+  return sanitizeReason(value) ?? (typeof value === 'string' && SAFE_REASONS.has(value) ? value : null);
 }
 
 function sanitizeProviderResult(result, provider) {

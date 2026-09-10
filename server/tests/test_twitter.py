@@ -186,3 +186,16 @@ class TwitterServiceTests(unittest.TestCase):
         self.assertEqual(values['TWITTER_AUTH_TOKEN'], TOKEN + ',' + NEW)
         self.assertEqual(values['WEIBO_COOKIES'], 'SUB=synthetic-weibo')
         self.assertFalse(any(provider == 'twitter' for provider, _, _ in self.service.prober.calls))
+
+    def test_diagnostic_opt_in_preserves_probe_failure_reason_and_legacy_response(self):
+        self.isolate(TOKEN)
+        request = sync.build_manual_update_request('twitter', NEW)
+        self.service.prober = ScriptedProber([sync.ProbeResult('transient', 403, 'http_403')])
+        request['diagnostics'] = True
+        self.assertEqual(self.service.apply(request), {'status': 'retryable_error', 'reason': 'http_403'})
+        self.service.prober = ScriptedProber([sync.ProbeResult('transient', 200, 'twitter_csrf_missing')])
+        self.assertEqual(self.service.apply(request), {'status': 'retryable_error', 'reason': 'twitter_csrf_missing'})
+        self.assertIn(TOKEN, self.live.read_text())
+        request.pop('diagnostics')
+        self.service.prober = ScriptedProber([TEMP])
+        self.assertEqual(self.service.apply(request), {'status': 'retryable_error'})

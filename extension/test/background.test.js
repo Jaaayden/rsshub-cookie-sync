@@ -594,3 +594,38 @@ test('missing Twitter auth_token reads both domains but never uploads an empty c
     globalThis.chrome = previousChrome;
   }
 });
+
+test('single-provider retry preserves other providers and logs safe per-stage results', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome({ initialStorage: { rsshubCookieSyncState: { enabled: false, providers: { weibo: { lastResult: 'unchanged', lastSyncAt: 100 } } } } });
+  fake.chrome.runtime.sendNativeMessage = (hostName, payload, callback) => {
+    fake.nativeMessages.push({ hostName, payload });
+    callback({ status: 'retryable_error', reason: 'twitter_csrf_missing', cookieHeader: 'LEAK-ME' });
+  };
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?retry-single=${Date.now()}-${Math.random()}`);
+    await flush();
+    const response = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'twitter' });
+    assert.equal(response.ok, true);
+    assert.equal(fake.nativeMessages.length, 1);
+    assert.deepEqual(Object.keys(fake.nativeMessages[0].payload.providers), ['twitter']);
+    assert.equal(fake.nativeMessages[0].payload.diagnostics, true);
+    assert.deepEqual(fake.cookieReads.map((r) => r.url), ['https://x.com/']);
+    assert.equal(response.providers.weibo.lastSyncAt, 100);
+    assert.equal(response.providers.twitter.lastReason, 'twitter_csrf_missing');
+    const logs = await sendMessage(fake.events.message, { type: 'get-diagnostics' });
+    assert.deepEqual(logs.entries.map((e) => e.stage), ['collect', 'native', 'complete']);
+    assert.equal(logs.entries.at(-1).reason, 'twitter_csrf_missing');
+    assert.equal(JSON.stringify(fake.storage).includes('LEAK-ME'), false);
+    assert.equal(JSON.stringify(fake.storage).includes('twitter-secret'), false);
+    const reads = fake.cookieReads.length;
+    await sendMessage(fake.events.message, { type: 'get-diagnostics' });
+    await sendMessage(fake.events.message, { type: 'clear-diagnostics' });
+    assert.equal(fake.cookieReads.length, reads);
+    assert.deepEqual((await sendMessage(fake.events.message, { type: 'get-diagnostics' })).entries, []);
+    const invalid = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'evil' });
+    assert.equal(invalid.ok, false);
+    assert.equal(fake.nativeMessages.length, 1);
+  } finally { globalThis.chrome = previousChrome; }
+});

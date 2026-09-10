@@ -179,3 +179,20 @@ journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 服务端必须直接访问 `x.com` 和 `api.x.com`，不会继承 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。不要通过把凭证发到自定义验证地址来排查。模拟测试只验证本项目的响应处理和回滚行为，部署后仍需用“立即同步”和脱敏服务端状态确认真实链路。
 
 扩展读取失败也可能是同一域出现多个不同的 `auth_token`。请在同一个 Edge Default Profile 重新登录 X；不会静默选取冲突值或混合两个域的 Cookie。X/Twitter 的“复制 Auth Token”输出裸令牌，可通过 `manual-update --provider twitter` 的隐藏提示输入。
+
+## 扩展诊断日志与单站点重试
+
+此功能自 v1.2.1 起提供，需更新扩展、Native Host 和服务端。旧 v1.2.0 安装不会自动获得这些日志能力；旧请求仍保持原有 v1 行为，新请求使用可选的 `diagnostics: true` 获取有限错误码。
+
+在弹窗展开“诊断日志”，点击失败站点卡片的“重试此站点”，再刷新日志。它只采集和上传该站点，不会重试其他站点。每次记录采集开始、上传及服务端处理开始、最终结果与总耗时；卡片时间表示最近尝试时间，不保证成功。
+
+- 停在采集阶段：查看权限、浏览器读取或凭证格式错误。
+- `host_configuration_invalid`：本机 Host 配置或运行文件检查失败。
+- `ssh_auth_failed`：SSH 明确返回公钥认证失败，此时才检查对应 `.pub` 是否授权。
+- `ssh_host_key_failed`：主机指纹检查失败，核对服务器身份，不要关闭检查。
+- `ssh_connection_failed` / `ssh_timeout`：连接或远程执行失败、超时，不等同于公钥错误。
+- `http_403` / `http_429` / `network_error`：服务端上游探针返回错误，与 SSH 认证不同。
+- `twitter_csrf_missing`：X 首页未提供可用的 CSRF Cookie。
+- `server_error`：远程程序非正常退出，可能涉及旧版本不支持诊断请求、部署配置或更新事务，需检查服务端状态。
+
+日志最多保留 200 条，可导出为 JSON；清空仅删除历史日志，不影响配置与 Cookie。正在同步时清空后仍可能出现新完成记录。日志刷新、导出、清空不会读取 Cookie 或启动 SSH。日志写入失败不阻断同步。日志不包含原始 Cookie、令牌、指纹、服务器地址、HTTP 响应体、SSH stderr 或密钥文件内容。
