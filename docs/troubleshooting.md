@@ -115,6 +115,19 @@ python3 native-host/install.py --activate-dedicated-key
 
 如果自动链路暂时不可用，也可以在扩展中复制对应 Cookie，再在服务器运行 `rsshub-cookie-sync manual-update --provider zhihu` 或 `--provider weibo` 的完整安装路径命令。具体命令见[项目首页的手动应急更新](../README.md#手动应急更新-cookie)。不要直接编辑 `rsshub.env`，否则会绕过格式检查、健康检查和回滚事务。
 
+## 扩展显示 `server_error`
+
+`server_error` 说明 Native Host 已连接到服务器，但服务端命令异常退出。若 RSSHub Compose 中的 `ACCESS_KEY` 最近有增加、更换，或 RSSHub 本地端口改过，常见原因是同步器仍在用旧的健康检查配置。先确认目标 RSSHub 已经按新 Compose 配置运行，再参考[服务端说明](../server/README.md#刷新-rsshub-连接配置)预览并刷新同步器配置：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config --dry-run
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config
+```
+
+第二条命令只应在预览通过后运行。它会重新读取所选 Compose service 的 `ACCESS_KEY`，验证当前 RSSHub 健康地址，仅在 HTTP 健康检查成功时保存配置；不会打印密钥。若需要同时更新端口，请使用服务端说明中的 `--rsshub-base-url` 参数。命令不会重建 RSSHub 或手动删除回滚事务；下一次同步或监控会通过已有事务恢复流程继续处理。
+
+如果预览未通过，不要编辑 `/etc/rsshub-cookie-sync/config.json` 或删除事务文件。先确认所选 Compose 文件、service、`ACCESS_KEY` 和 RSSHub 正在监听的本地地址一致，再重试。详细脱敏服务端状态和日志查看命令见本页[查看服务器状态](#查看服务器状态)。
+
 ## `稍后重试`、超时或上游错误
 
 `403`、`429`、`432`、超时和 `5xx` 会被视为临时上游或网络故障，不会立即替换 Cookie。等待下一次定时检查，或确认服务器 DNS、出口网络、防火墙和上游限流情况。
@@ -203,6 +216,6 @@ journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 - `ssh_connection_failed` / `ssh_timeout`：连接或远程执行失败、超时，不等同于公钥错误。
 - `http_403` / `http_429` / `network_error`：服务端上游探针返回错误，与 SSH 认证不同。
 - `twitter_csrf_missing`：X 首页未提供可用的 CSRF Cookie。
-- `server_error`：远程程序非正常退出，可能涉及旧版本不支持诊断请求、部署配置或更新事务，需检查服务端状态。
+- `server_error`：远程程序非正常退出，可能涉及旧版本不支持诊断请求、健康检查配置与 RSSHub 当前 `ACCESS_KEY` 不匹配，或更新事务；先按上面的步骤检查服务端配置和状态。
 
 日志最多保留 200 条，可导出为 JSON；清空仅删除历史日志，不影响配置与 Cookie。正在同步时清空后仍可能出现新完成记录。日志刷新、导出、清空不会读取 Cookie 或启动 SSH。日志写入失败不阻断同步。日志不包含原始 Cookie、令牌、指纹、服务器地址、HTTP 响应体、SSH stderr 或密钥文件内容。

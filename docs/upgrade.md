@@ -56,6 +56,24 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 
 应输出 `OK`。上面的两个安装命令始终安装最新稳定 Release；目前是 v1.3.1，以安装器显示的版本为准。以后有更新版本时，请使用同一版本的扩展及组件。
 
+### RSSHub `ACCESS_KEY` 配置刷新（仓库未发布补丁）
+
+本仓库新增了首次安装时从所选 Compose service 自动读取 `ACCESS_KEY`，以及后续重新读取配置的命令；该改动尚未包含在 v1.3.1 Release 中。所以上面的 `releases/latest` 安装命令仍会安装 v1.3.1，不能提供此功能。先从包含该改动的源码版本更新服务端程序，或等后续 Release 发布后再按对应升级说明操作。
+
+安装了包含修复的服务端程序后，先让 RSSHub 按更新后的 Compose 配置运行，再在服务器 root shell 中预览健康检查：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config --dry-run
+```
+
+预览通过后更新同步器配置：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config
+```
+
+如本地 RSSHub 地址或端口有变化，可同时指定新地址，例如 `--rsshub-base-url http://127.0.0.1:1300`。命令从当前所选 Compose service 重新读取 `ACCESS_KEY`，验证成功后才会原子写入配置；不会输出密钥、重建 RSSHub 或删除事务文件。`--dry-run` 仅进行只读 Docker/HTTP 查询且不写配置。完整说明见[服务端配置刷新](../server/README.md#刷新-rsshub-连接配置)。
+
 ## 4. 确认升级结果
 
 - “已切换”：新凭证已写入 RSSHub；默认直接同步模式未验证上游登录态。

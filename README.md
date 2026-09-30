@@ -48,9 +48,11 @@ ssh -p <服务器SSH端口> root@<服务器地址>
 curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh
 ```
 
-服务端安装器会自动查找常见位置的 Compose 文件；普通官方布局直接确认即可。它默认使用 `rsshub` service 和 `http://127.0.0.1:1200`，并让 Docker Compose 自动解析 project 名称。安装过程中会要求粘贴第一步复制的那一整行公钥，也可以配置 Bark。服务端会在这一步自动创建 `rsshub-sync` 受限账号并安装公钥，不需要另开终端或单独执行授权命令。
+服务端安装器会自动查找常见位置的 Compose 文件；普通官方布局直接确认即可。它默认使用 `rsshub` service 和 `http://127.0.0.1:1200`，并让 Docker Compose 自动解析 project 名称。安装时也会读取所选 RSSHub service 经 Docker Compose 展开后的 `ACCESS_KEY`，安全保存到同步器配置供健康检查使用；密钥不会显示在终端。安装过程中会要求粘贴第一步复制的那一整行公钥，也可以配置 Bark。服务端会在这一步自动创建 `rsshub-sync` 受限账号并安装公钥，不需要另开终端或单独执行授权命令。
 
 如果 Compose 文件不在常见位置，安装器会在交互提示中要求输入绝对路径。它不会下载或更新 RSSHub 镜像，也不会连接你的 Mac。
+
+注意：本仓库新增的 `ACCESS_KEY` 自动识别和后续刷新功能尚未包含在 v1.3.1 Release 中；上面的 `releases/latest` 安装命令当前仍会安装 v1.3.1。要使用新命令，需先安装包含本次修复的服务端源码版本，或等待后续 Release。具体见[配置升级说明](docs/upgrade.md)。
 
 ### 第三步：安装 Edge 扩展
 
@@ -98,6 +100,7 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 | SSH 私钥 | 保留在当前用户的 `~/.ssh/`，扩展只能看到安全的文件名 |
 | Compose 文件、project、service | 服务端安装器自动发现并让 Docker Compose 解析；非标准部署才手工指定 |
 | RSSHub 健康地址 | 默认 `http://127.0.0.1:1200`，普通安装不询问 |
+| RSSHub `ACCESS_KEY` | 从所选 service 的 Compose 展开配置自动读取，保存在服务端权限为 `0600` 的同步器配置中；不会输出密钥 |
 | Bark Device Key | 服务端交互输入，保存在 root-only 配置中 |
 | 知乎、微博 Cookie 及 X/Twitter Auth Token | 从 Edge 临时读取；live 值只保存在服务器的 root-only env 中 |
 
@@ -266,6 +269,7 @@ python3 native-host/install.py --activate-dedicated-key
 - Native Host 不可用：在 Mac 重新运行 `curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh`，然后在 `edge://extensions` 重新加载扩展；只有源码安装或调试时才使用 [Native Host 说明](native-host/README.md) 中的源码兼容命令。
 - SSH 连接失败：检查扩展“连接设置”、`~/.ssh/known_hosts` 指纹以及服务器上的公钥是否对应；不要关闭主机密钥校验。
 - 知乎动态仍返回 403：确认扩展已更新并重新授权站点权限，再检查同一 Edge 配置文件中是否有 `d_c0` 和 `z_c0`；详细步骤见[故障排查](docs/troubleshooting.md#知乎动态仍返回-403)。默认直接同步不会验证上游是否接受 Cookie。
+- 扩展同步显示 `server_error`：如果 RSSHub Compose 中的 `ACCESS_KEY` 最近有改动，先按[服务端说明](server/README.md#刷新-rsshub-连接配置)执行配置刷新；刷新只会在当前健康地址验证新配置成功后保存。
 - 没有 Bark：服务端安装时可以跳过，之后按 [服务端说明](server/README.md) 配置并运行 `notify-test`。
 
 更多故障分类和安全恢复步骤见 [故障排查](docs/troubleshooting.md)。

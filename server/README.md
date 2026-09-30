@@ -37,8 +37,9 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 2. 默认选择官方文件常见的 `rsshub` service；如果没有该名称，会列出实际服务并让你选择；
 3. 让 Docker Compose 自动解析 project 名称；
 4. 默认把 RSSHub 健康地址设为 `http://127.0.0.1:1200`；
-5. 询问是否配置 Bark；
-6. 在开始部署前要求粘贴 Native Host 公钥；把刚才在 Mac 上复制的那一整行公钥粘贴进去。
+5. 从选中的 RSSHub service 经 Docker Compose 展开后的环境配置中读取 `ACCESS_KEY`，保存到同步器配置供健康检查使用；不会把密钥打印出来；
+6. 询问是否配置 Bark；
+7. 在开始部署前要求粘贴 Native Host 公钥；把刚才在 Mac 上复制的那一整行公钥粘贴进去。
 
 普通安装不需要填写 project、service 或健康地址，也不需要另开终端执行 `provision-key`。Compose 在其他位置时，安装器会提示输入绝对路径。项目源码也可以直接安装：
 
@@ -48,6 +49,8 @@ sudo ./install.sh
 ```
 
 这里的 `/path/to/...` 只是示例路径，不能照抄。出于防篡改要求，源码目录、Compose 文件及其父目录必须由 root 拥有，且不能让 group/world 写入；因此不要从普通用户可写的 home 目录直接执行源码安装。新手直接使用上面的一键命令即可。安装器不会向服务器拉取 RSSHub 镜像，不会连接客户端，也不会执行 `docker compose down`。
+
+首次读取的值来自所选 service 的有效 Compose 配置：包含该 service 的 `environment` 与 `env_file`，并遵循 Compose 对 `.env` 插值和环境优先级的解析结果。配置里没有 `ACCESS_KEY` 时，健康检查沿用无 key 模式；如果之后增加或更换了 `ACCESS_KEY`，请在目标 RSSHub 已按新 Compose 配置启动后运行[刷新命令](#刷新-rsshub-连接配置)。
 
 ## 安装器会修改什么
 
@@ -163,6 +166,31 @@ journalctl -u rsshub-cookie-sync-monitor.service -n 100 --no-pager
 ```
 
 默认每 15 分钟检查 RSSHub 服务及配置的订阅路径，连续两次路由异常通知，恢复通知；不会因此更换凭证。仅 `verified` 模式使用旧上游探针：连续两次明确认证失败才会尝试切换已验证候选；`403`、`429`、`432`、超时和 `5xx` 会暂时归类为上游故障，不会立即换 Cookie。
+
+## 刷新 RSSHub 连接配置
+
+当 RSSHub Compose 中的 `ACCESS_KEY` 或本地访问地址发生变化时，在服务器 root shell 中运行。可以先预览，不保存配置：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config --dry-run
+```
+
+预览显示健康检查通过后，再保存新配置：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config
+```
+
+命令会从已配置的 Compose 文件和 service 重新读取 `ACCESS_KEY`，使用当前健康地址检查运行中的 RSSHub；只有健康检查成功才会原子更新同步器配置，旧配置保持原样直到验证通过。密钥不会出现在命令参数、输出或日志中。`--dry-run` 会取得部署锁，并进行只读的 Docker/HTTP 查询；首次执行可能创建锁文件，但不会写配置、重建 RSSHub 或恢复待处理事务。
+
+如果本机 RSSHub 地址或端口也改了，先让新地址上的 RSSHub 按 Compose 配置运行，再将新地址传给刷新命令。例如：
+
+```sh
+/usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync refresh-rsshub-config \
+  --rsshub-base-url http://127.0.0.1:1300
+```
+
+如果只改了 Compose 内的 `ACCESS_KEY`，先按平常方式应用 Compose 变更并确认 RSSHub 已使用新 key 启动，然后执行刷新。否则健康检查仍会遇到旧运行配置，命令会拒绝保存新值。刷新不会重建 RSSHub，也不会删除事务文件；下一次正常同步或监控会按现有事务流程处理待恢复状态。可选地在操作前以 root-only 权限备份 `/etc/rsshub-cookie-sync/config.json`；不要直接编辑或展示其中的密钥。
 
 ## 升级和重装
 

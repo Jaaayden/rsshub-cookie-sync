@@ -1073,8 +1073,9 @@ fi
 config_prepared=1
 chmod 0600 "$CONFIG_FILE"
 
-# Pass only non-secret deployment metadata to the config command.  The
-# explicit --config makes a reinstall independent of process environment.
+# Pass only non-secret deployment metadata to the config command.  It reads
+# the selected service's ACCESS_KEY from Compose in memory, before bootstrap.
+# The explicit --config makes a reinstall independent of process environment.
 if [ "$REPLACE_DEPLOYMENT" -eq 1 ]; then
     /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
         --config "$CONFIG_FILE" configure-deployment \
@@ -1086,6 +1087,7 @@ if [ "$REPLACE_DEPLOYMENT" -eq 1 ]; then
         --project "$PROJECT" \
         --service "$SERVICE" \
         --rsshub-base-url "$RSSHUB_BASE_URL" \
+        --detect-rsshub-access-key \
         --replace-deployment >/dev/null
 else
     /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
@@ -1097,7 +1099,8 @@ else
         --lock-file "$LOCK_FILE" \
         --project "$PROJECT" \
         --service "$SERVICE" \
-        --rsshub-base-url "$RSSHUB_BASE_URL" >/dev/null
+        --rsshub-base-url "$RSSHUB_BASE_URL" \
+        --detect-rsshub-access-key >/dev/null
 fi
 
 if ! id "$SSH_USER" >/dev/null 2>&1; then
