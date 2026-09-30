@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { COOKIE_PERMISSION_ORIGINS } from '../lib/cookies.js';
 
 const extensionDir = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -17,6 +18,10 @@ test('manifest requests only the intended APIs and exact optional cookie-domain 
   ]);
   assert.deepEqual(manifest.optional_permissions, ['clipboardWrite']);
   assert.deepEqual([...manifest.optional_host_permissions].sort(), [
+    'http://m.weibo.cn/*',
+    'http://weibo.cn/*',
+    'http://www.zhihu.com/*',
+    'http://zhihu.com/*',
     'https://m.weibo.cn/*',
     'https://twitter.com/*',
     'https://weibo.cn/*',
@@ -24,6 +29,7 @@ test('manifest requests only the intended APIs and exact optional cookie-domain 
     'https://x.com/*',
     'https://zhihu.com/*',
   ]);
+  assert.deepEqual([...COOKIE_PERMISSION_ORIGINS].sort(), [...manifest.optional_host_permissions].sort());
   assert.equal(manifest.optional_host_permissions.some((origin) => origin.includes('*.')), false);
   assert.equal(manifest.optional_host_permissions.includes('<all_urls>'), false);
   assert.equal(Object.hasOwn(manifest, 'host_permissions'), false);

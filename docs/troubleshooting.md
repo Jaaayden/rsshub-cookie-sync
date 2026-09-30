@@ -5,7 +5,7 @@ v1.3.0 默认直接同步，上游 HTTP 404 或非 JSON 不再阻止上传。订
 先按下面的顺序判断问题在哪一段：
 
 ```text
-Edge 权限 → Native Host → SSH 公钥/主机密钥 → 服务器探针 → RSSHub 容器
+Edge 权限 → Native Host → SSH 公钥/主机密钥 → 服务端格式检查与写入 → RSSHub 路由
 ```
 
 排查时不要把 Cookie、Bark Key、SSH 私钥、完整请求头或未脱敏日志发到网上。
@@ -27,6 +27,14 @@ Edge 权限 → Native Host → SSH 公钥/主机密钥 → 服务器探针 → 
 - 站点没有刚刚注销或触发重新登录。
 
 重新登录后点击“立即同步”。扩展不会代替输入密码，也不会绕过验证码或 MFA。
+
+更新扩展后请再次点击“授权站点权限”，并允许知乎、微博新增的 HTTP host 权限。Chromium 会按 Cookie 的 `Secure` 属性构造权限校验地址，HTTPS 权限不足以读取 `d_c0` 这类非 Secure Cookie；扩展实际仍只通过 HTTPS URL 查询 Cookie，不会用 HTTP 请求站点。[Chromium `cookies_helpers`](https://chromium.googlesource.com/chromium/src/+/f068a76f1819af40b5b5077fbcadc2381c1671d7/chrome/browser/extensions/api/cookies/cookies_helpers.h) 对此有实现注释。
+
+## 知乎动态仍返回 403
+
+确认当前 Edge 配置文件已登录知乎，并且扩展已更新、重新授权站点权限。知乎动态需要同一会话中的非空 `d_c0` 和 `z_c0`；缺失或存在冲突值时，扩展会在本机停止同步，不上传、不覆盖服务器上的 Cookie。同步上传会省略静态 `__zse_ck`，由 RSSHub 按当前 `d_c0` 会话生成；手动“复制 Cookie”仍保留浏览器返回的完整内容。RSSHub 的[知乎修复 PR #22319](https://github.com/DIYgod/RSSHub/pull/22319)说明了活动内容对 `z_c0` 的需要及自动生成 `__zse_ck` 的推荐配置。
+
+默认 `direct` 模式不会验证上传后的知乎登录态，所以扩展显示同步成功不等于 RSSHub 已能抓取内容。完成同步后，检查实际订阅路由的 RSSHub 响应；订阅监控的 `route_http_403` 等结果代表路由请求异常，排查方式见[订阅监控](route-monitoring.md)。
 
 ## Native Host 不可用
 
@@ -101,11 +109,11 @@ python3 native-host/install.py --activate-dedicated-key
 
 主机密钥校验故意采用严格模式。不要使用“接受未知 key”或关闭校验来绕过错误。
 
-## `候选被拒绝`
+## 服务端返回 `rejected_invalid`
 
-这表示对应 provider 的登录态探针明确失败。无效候选不会覆盖 live env，也不会重建 RSSHub。请在 Edge 重新登录对应 provider，再点“立即同步”。
+默认 `direct` 模式不调用 provider 登录态探针；`rejected_invalid` 通常表示凭证格式检查未通过，或当前 X 多账号令牌池不受支持。只有显式设置 `sync_mode: "verified"` 时，这个结果才可能表示上游登录态探针拒绝了凭证。direct 模式细节见[同步模式与订阅监控](route-monitoring.md)。
 
-如果自动链路暂时不可用，也可以在扩展中复制对应 Cookie，再在服务器运行 `rsshub-cookie-sync manual-update --provider zhihu` 或 `--provider weibo` 的完整安装路径命令。具体命令见[项目首页的手动应急更新](../README.md#手动应急更新-cookie)。不要直接编辑 `rsshub.env`，否则会绕过验证和回滚事务。
+如果自动链路暂时不可用，也可以在扩展中复制对应 Cookie，再在服务器运行 `rsshub-cookie-sync manual-update --provider zhihu` 或 `--provider weibo` 的完整安装路径命令。具体命令见[项目首页的手动应急更新](../README.md#手动应急更新-cookie)。不要直接编辑 `rsshub.env`，否则会绕过格式检查、健康检查和回滚事务。
 
 ## `稍后重试`、超时或上游错误
 

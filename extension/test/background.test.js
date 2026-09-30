@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { COOKIE_PERMISSION_ORIGINS, sha256Hex } from '../lib/cookies.js';
 
 function makeEvent() {
   const listeners = [];
@@ -61,7 +62,7 @@ function fakeCookie(provider) {
   };
 }
 
-function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfigResponse = null } = {}) {
+function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfigResponse = null, cookiesByProvider = {}, grantedOrigins = null } = {}) {
   const events = {
     installed: makeEvent(),
     startup: makeEvent(),
@@ -76,6 +77,7 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
   const storage = structuredClone(initialStorage);
   const pendingStorageGets = [];
   let permissionsGranted = true;
+  let origins = grantedOrigins;
 
   const chrome = {
     runtime: {
@@ -124,7 +126,7 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
     permissions: {
       contains(details, callback) {
         permissionChecks.push(structuredClone(details));
-        callback(permissionsGranted);
+        callback(permissionsGranted && (!origins || details.origins.every((origin) => origins.includes(origin))));
       },
     },
     cookies: {
@@ -132,7 +134,14 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
       getAll(details, callback) {
         cookieReads.push(structuredClone(details));
         const provider = details.url.includes('zhihu') ? 'zhihu' : details.url.includes('weibo') ? 'weibo' : 'twitter';
-        callback([fakeCookie(provider)]);
+        const records = cookiesByProvider[provider] ?? (provider === 'zhihu'
+          ? [{ ...fakeCookie(provider), name: 'd_c0', value: 'fake-device=|1234567890', secure: false }, fakeCookie(provider)]
+          : [fakeCookie(provider)]);
+        // Chromium checks host access for each cookie using its Secure flag,
+        // independently of the HTTPS URL queried by getAll.
+        callback(records.filter((cookie) => !origins || origins.includes(
+          `${cookie.secure ? 'https' : 'http'}://${cookie.domain.replace(/^\./u, '')}/*`,
+        )));
       },
     },
     alarms: {
@@ -157,6 +166,9 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
     storage,
     setPermissionsGranted(value) {
       permissionsGranted = value;
+    },
+    setGrantedOrigins(value) {
+      origins = value;
     },
     releaseStorageGets() {
       for (const { key, callback } of pendingStorageGets.splice(0)) {
@@ -384,7 +396,7 @@ test('复制 Cookie 只读取请求中的 provider，不上传、不持久化 Co
     assert.deepEqual(response, {
       ok: true,
       provider: 'zhihu',
-      cookieHeader: 'z_c0=zhihu-secret=a=b',
+      cookieHeader: 'd_c0=fake-device=|1234567890; z_c0=zhihu-secret=a=b',
     });
     assert.equal(fake.cookieReads.length, beforeReads + 1);
     assert.equal(fake.cookieReads.at(-1).url, 'https://www.zhihu.com/api/v3/moments');
@@ -421,6 +433,78 @@ test('复制 Cookie 的站点权限被拒绝时不读取目标 Cookie', async ()
     assert.deepEqual(response, { ok: false, error: 'permission_required' });
     assert.equal(fake.cookieReads.length, 0);
     assert.equal(fake.nativeMessages.length, 0);
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('旧 HTTPS 授权不能静默同步残缺知乎 Cookie，补齐权限后保留非 Secure 字段', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome({
+    grantedOrigins: COOKIE_PERMISSION_ORIGINS.filter((origin) => origin.startsWith('https:')),
+    cookiesByProvider: {
+      zhihu: [
+        { ...fakeCookie('zhihu'), name: 'd_c0', value: 'fake-device=|1234567890', secure: false },
+        { ...fakeCookie('zhihu'), name: '_xsrf', value: 'fake-xsrf', secure: false },
+        { ...fakeCookie('zhihu'), name: '__zse_ck', value: 'fake-browser-challenge' },
+        fakeCookie('zhihu'),
+      ],
+    },
+  });
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?zhihu-permissions=${Date.now()}-${Math.random()}`);
+    const denied = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'zhihu' });
+    assert.equal(denied.providers.zhihu.lastResult, 'permission_required');
+    assert.equal(fake.cookieReads.length, 0);
+    assert.equal(fake.nativeMessages.length, 0);
+
+    fake.setGrantedOrigins(COOKIE_PERMISSION_ORIGINS);
+    const synced = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'zhihu' });
+    const header = fake.nativeMessages.at(-1).payload.providers.zhihu.cookieHeader;
+    assert.equal(header, '_xsrf=fake-xsrf; d_c0=fake-device=|1234567890; z_c0=zhihu-secret=a=b');
+    assert.equal(synced.providers.zhihu.lastResult, 'candidate_saved');
+    assert.equal(synced.providers.zhihu.hash, await sha256Hex(header));
+    assert.equal(JSON.stringify(fake.storage).includes('fake-device'), false);
+    assert.equal(JSON.stringify(fake.storage).includes('fake-xsrf'), false);
+    assert.equal(JSON.stringify(fake.storage).includes('zhihu-secret'), false);
+
+    const copy = await sendMessage(fake.events.message, { type: 'copy-cookie', provider: 'zhihu' });
+    assert.ok(copy.cookieHeader.includes('__zse_ck=fake-browser-challenge'), 'explicit copy retains the browser header');
+    const beforeRotation = fake.nativeMessages.at(-1).payload.providers.zhihu.cookieHeader;
+    fake.chrome.cookies.getAll = (_details, callback) => callback([
+      { ...fakeCookie('zhihu'), name: 'd_c0', value: 'fake-device=|1234567890', secure: false },
+      { ...fakeCookie('zhihu'), name: '_xsrf', value: 'fake-xsrf', secure: false },
+      { ...fakeCookie('zhihu'), name: '__zse_ck', value: 'fake-rotated-challenge' },
+      fakeCookie('zhihu'),
+    ]);
+    const rotated = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'zhihu' });
+    assert.equal(fake.nativeMessages.at(-1).payload.providers.zhihu.cookieHeader, beforeRotation);
+    assert.equal(rotated.providers.zhihu.hash, synced.providers.zhihu.hash, 'browser challenge rotation does not change the uploaded credentials');
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
+});
+
+test('知乎缺少设备或登录 Cookie 时明确失败，不启动 Native Host', async () => {
+  const previousChrome = globalThis.chrome;
+  const cases = [
+    { records: [fakeCookie('zhihu')], reason: 'zhihu_missing_dc0' },
+    { records: [{ ...fakeCookie('zhihu'), name: 'd_c0' }], reason: 'zhihu_missing_zc0' },
+    { records: [fakeCookie('zhihu'), { ...fakeCookie('zhihu'), name: 'd_c0', value: 'fake-one' }, { ...fakeCookie('zhihu'), name: 'd_c0', value: 'fake-two' }], reason: 'zhihu_ambiguous_session' },
+  ];
+  try {
+    for (const { records, reason } of cases) {
+      const fake = makeChrome({ cookiesByProvider: { zhihu: records } });
+      globalThis.chrome = fake.chrome;
+      await import(`../background.js?zhihu-incomplete=${Date.now()}-${Math.random()}`);
+      const response = await sendMessage(fake.events.message, { type: 'sync-provider', provider: 'zhihu' });
+      assert.equal(response.providers.zhihu.lastResult, 'retryable_error');
+      assert.equal(response.providers.zhihu.lastReason, reason);
+      assert.equal(response.providers.zhihu.hash, null);
+      assert.equal(fake.nativeMessages.length, 0);
+      assert.ok(fake.storage.rsshubCookieSyncDiagnostics.some((entry) => entry.reason === reason));
+    }
   } finally {
     globalThis.chrome = previousChrome;
   }

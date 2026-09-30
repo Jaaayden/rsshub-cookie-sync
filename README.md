@@ -84,6 +84,8 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 
 点击“保存连接设置”。再在同一个 Edge Default Profile 登录所需站点：`https://www.zhihu.com`、`https://m.weibo.cn` 和 `https://x.com`，点击“授权站点权限”，最后点击“立即同步”。如果弹窗显示刚才的旧结果，再点一次“刷新扩展状态”；重新读取网站登录态则使用“立即同步”。
 
+更新扩展后也要重新点击“授权站点权限”，允许知乎和微博新增的 HTTP host 权限。Chromium 会按每个 Cookie 的 `Secure` 属性检查对应 host 权限，因此仅有 HTTPS 权限时，扩展可能读不到 `d_c0` 这类非 Secure Cookie。扩展仍只通过 HTTPS URL 查询 Cookie，并通过 Native Host 和 SSH 上传；不会用 HTTP 请求知乎或微博。
+
 扩展设置页允许高级用户手动选择其他已有的 Ed25519，但安装器不会为它们创建或自动迁移配置。只有确认该密钥没有同时用于 `root` 或其他服务器时才应使用；普通安装始终使用项目专用的 `rsshub-cookie-sync`。
 
 ## 哪些内容会配置，哪些不会写死
@@ -111,6 +113,8 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 - 右上角开关：暂停或恢复自动同步。暂停不影响已经安装在服务器上的监控。
 
 自动同步在 Edge 启动、每 15 分钟以及目标 Cookie 变化后触发。Cookie 变化会等待约 2 分钟合并，避免短时间内重复上传。Edge 关闭或 Mac 睡眠时不会采集，但服务器监控仍会运行。
+
+知乎动态同步要求同一浏览器会话中存在非空的 `d_c0` 和 `z_c0`。缺少其中任一个，或同名 Cookie 存在冲突值时，扩展会在本机停止本次同步，不上传也不更新服务器上的 Cookie。同步上传会省略浏览器里的 `__zse_ck`，由 RSSHub 按当前设备会话生成；其他适用 Cookie 及其值保持原样，包括值中的 `=` 和 `|`。手动“复制 Cookie”仍复制浏览器返回的完整 Cookie，不会省略 `__zse_ck`。关于知乎所需 Cookie 与 `__zse_ck` 的生成方式，见 [RSSHub PR #22319](https://github.com/DIYgod/RSSHub/pull/22319)。
 
 ### 手动应急更新 Cookie
 
@@ -261,7 +265,7 @@ python3 native-host/install.py --activate-dedicated-key
 - `需授权`：点击“授权站点权限”，并确认登录的是 Edge Default Profile。
 - Native Host 不可用：在 Mac 重新运行 `curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-macos.sh | sh`，然后在 `edge://extensions` 重新加载扩展；只有源码安装或调试时才使用 [Native Host 说明](native-host/README.md) 中的源码兼容命令。
 - SSH 连接失败：检查扩展“连接设置”、`~/.ssh/known_hosts` 指纹以及服务器上的公钥是否对应；不要关闭主机密钥校验。
-- `候选被拒绝`：先在 Edge 重新登录对应网站，再点击“立即同步”。
+- 知乎动态仍返回 403：确认扩展已更新并重新授权站点权限，再检查同一 Edge 配置文件中是否有 `d_c0` 和 `z_c0`；详细步骤见[故障排查](docs/troubleshooting.md#知乎动态仍返回-403)。默认直接同步不会验证上游是否接受 Cookie。
 - 没有 Bark：服务端安装时可以跳过，之后按 [服务端说明](server/README.md) 配置并运行 `notify-test`。
 
 更多故障分类和安全恢复步骤见 [故障排查](docs/troubleshooting.md)。
@@ -275,7 +279,7 @@ python3 native-host/install.py --activate-dedicated-key
 - `403`、`429`、`432`、超时和 `5xx` 会被当作临时上游故障，不会立即更换 Cookie；
 - 本项目不自动输入密码，不绕过验证码或 MFA。
 
-Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 Docker 管理权限的人可以读取它；这属于宿主机信任边界。浏览器扩展只申请知乎、微博、X/Twitter 的六个精确主机权限，不申请网页脚本注入或全站点权限。
+Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 Docker 管理权限的人可以读取它；这属于宿主机信任边界。浏览器扩展只申请知乎、微博、X/Twitter 的六个精确主机权限，不申请网页脚本注入或全站点权限。为读取非 Secure Cookie，知乎和微博的四个精确主机还需要对应的 HTTP 权限；X/Twitter 仅使用 HTTPS 权限。
 
 ## 开发、测试和打包
 

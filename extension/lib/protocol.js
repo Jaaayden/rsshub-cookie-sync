@@ -59,6 +59,9 @@ export const DIAGNOSTIC_REASON_LABELS = Object.freeze({
   config_not_ok: '微博登录检查未通过',
   config_logged_out: '微博已退出登录',
   invalid_cookie: '凭证格式异常',
+  zhihu_missing_dc0: '知乎缺少 d_c0，请确认站点权限并在同一浏览器配置中登录后重试',
+  zhihu_missing_zc0: '知乎缺少 z_c0，请在同一浏览器配置中登录后重试',
+  zhihu_ambiguous_session: '知乎存在冲突的登录或设备 Cookie，请在同一浏览器配置中重新登录',
 });
 
 export function diagnosticReasonLabel(reason) {

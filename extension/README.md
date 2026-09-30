@@ -29,6 +29,8 @@ git clone https://github.com/Jaaayden/rsshub-cookie-sync.git ~/rsshub-cookie-syn
 3. 确认已经按 [Native Host 说明](../native-host/README.md) 安装本机桥接程序，并在扩展“连接设置”中填写服务器地址、端口和 SSH 密钥文件名。
 4. 点击“立即同步”。
 
+更新扩展后也要重新点击“授权站点权限”，允许知乎和微博新增的 HTTP host 权限。Chromium 按 Cookie 的 `Secure` 属性构造 host 权限检查地址，因此仅授权 HTTPS 时可能读不到 `d_c0` 这类非 Secure Cookie。扩展仍只通过 HTTPS URL 查询 Cookie，并经 Native Host 和 SSH 上传；不会用 HTTP 请求知乎或微博。可参阅 Chromium 的 [`cookies_helpers`](https://chromium.googlesource.com/chromium/src/+/f068a76f1819af40b5b5077fbcadc2381c1671d7/chrome/browser/extensions/api/cookies/cookies_helpers.h) 实现说明。
+
 > 重要：普通安装应选择项目专用的 `rsshub-cookie-sync` 私钥，不会回退到 `id_ed25519` 等通用登录密钥。选择私钥不会自动授权；对应的 `~/.ssh/rsshub-cookie-sync.pub` 必须先通过管理员 SSH 连接安装到服务器的 `rsshub-sync` 账号。扩展日常连接使用的不是 `root`。
 
 知乎、微博按以下请求 URL 采集 Cookie：
@@ -40,7 +42,9 @@ https://m.weibo.cn/feed/group
 
 X/Twitter 按 `https://x.com/` → `https://twitter.com/` 的顺序采集，仅上传单个 `auth_token`。X 没有令牌才会回退，读取失败或令牌冲突时停止；不会混合两个域的登录态。
 
-服务器会先验证候选。无效候选不会覆盖当前 live 配置；只有一方成功时，另一方也不会被清空。
+知乎动态同步要求同一浏览器会话中存在非空的 `d_c0` 和 `z_c0`。缺少其中任一个，或同名 Cookie 存在冲突值时，扩展会在本机停止本次同步，不上传也不更新服务器上的 Cookie。同步上传会省略浏览器里的 `__zse_ck`，由 RSSHub 按当前设备会话生成；其他适用 Cookie 及其值保持原样，包括值中的 `=` 和 `|`。这只影响同步上传；“复制 Cookie”仍复制浏览器返回的完整 Cookie，不会省略 `__zse_ck`。RSSHub 对知乎 Cookie 的建议见 [PR #22319](https://github.com/DIYgod/RSSHub/pull/22319)。
+
+默认 `direct` 模式只检查凭证格式并直接更新 live 配置，不在上传前验证知乎、微博或 X 的登录态。凭证变更时，服务端仍会检查 Compose 配置和 RSSHub 健康状态，并在失败时回滚；凭证未变时不会重建容器。只有显式设置 `sync_mode: "verified"` 时才会调用上游登录态探针。详见[同步模式与订阅监控](../docs/route-monitoring.md)。
 
 ## 按钮说明
 
@@ -66,7 +70,7 @@ X/Twitter 按 `https://x.com/` → `https://twitter.com/` 的顺序采集，仅�
 /usr/local/lib/rsshub-cookie-sync/rsshub-cookie-sync manual-update --provider twitter
 ```
 
-在隐藏提示中粘贴，不要把 Cookie 写进命令参数，也不要粘贴到聊天、Issue 或网页表单。服务端会继续执行验证、候选和回滚事务。扩展不会保存复制内容；剪贴板由操作系统管理，请在完成后清理。
+在隐藏提示中粘贴，不要把 Cookie 写进命令参数，也不要粘贴到聊天、Issue 或网页表单。服务端会检查凭证格式，并在配置或健康检查失败时回滚；默认 `direct` 模式不会验证上游登录态。扩展不会保存复制内容；剪贴板由操作系统管理，请在完成后清理。
 
 ### 自动同步开关
 
@@ -104,9 +108,9 @@ Manifest 申请：
 - `nativeMessaging`：调用本机 Host；
 - `storage`：只保存启用开关、SHA-256 指纹、时间和固定结果码；
 - 可选 `clipboardWrite`：仅在用户明确执行复制操作时使用；
-- 可选 host permissions：知乎、微博、X/Twitter 六个精确 host。
+- 可选 host permissions：知乎、微博、X/Twitter 六个精确 host。知乎和微博的四个精确 host 同时申请 HTTP 与 HTTPS 权限，以便读取 Secure 与非 Secure Cookie；X/Twitter 只申请 HTTPS 权限。
 
-没有全站点权限、网页脚本注入权限或 `clipboardRead` 权限。扩展不会跨浏览器或跨 Edge Profile 读取 Cookie。
+没有全站点权限、网页脚本注入权限或 `clipboardRead` 权限。HTTP host 权限只用于 Cookie API 的权限判定；采集仍使用上面列出的 HTTPS URL，不会通过 HTTP 访问站点或发送凭证。扩展不会跨浏览器或跨 Edge Profile 读取 Cookie。
 
 ## 隐私和安全
 
@@ -120,7 +124,7 @@ rejected_invalid
 retryable_error
 ```
 
-浏览器关闭或 Mac 睡眠时无法采集，服务器端仍可继续检查 RSSHub 和 provider 登录态。扩展不会代替用户输入密码，也不会绕过验证码或 MFA。
+浏览器关闭或 Mac 睡眠时无法采集，服务器端仍可继续检查 RSSHub 及已配置的订阅路由；上游登录态探针只在显式设置 `verified` 模式时运行。扩展不会代替用户输入密码，也不会绕过验证码或 MFA。
 
 ## 更新和卸载
 

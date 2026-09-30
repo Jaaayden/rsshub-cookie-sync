@@ -1,12 +1,12 @@
-# 从旧版本升级到 v1.3.0
+# 从旧版本升级到 v1.3.1
 
-v1.3.0 默认改为直接同步，解决独立 X 探针 HTTP 404、知乎动态接口非 JSON 阻止上传的问题。旧配置未设置 `sync_mode` 时自动采用 `direct`；已显式配置 `verified` 的用户需改为 `direct`。订阅监控需要额外配置路径，见 [配置说明](route-monitoring.md)，未配置路径时仅检查 RSSHub 服务。
+v1.3.1 修复 Edge 扩展读取知乎、微博非 Secure Cookie 时缺少精确 HTTP host 权限的问题。v1.3.0 默认改为直接同步，解决独立 X 探针 HTTP 404、知乎动态接口非 JSON 阻止上传的问题。旧配置未设置 `sync_mode` 时自动采用 `direct`；已显式配置 `verified` 的用户需改为 `direct`。订阅监控需要额外配置路径，见 [配置说明](route-monitoring.md)，未配置路径时仅检查 RSSHub 服务。
 
-适用于已安装旧版本的用户。需要依次更新 **服务端 → Mac Native Host → Edge 扩展**；只替换扩展 ZIP 不够，旧 Host 和服务端不认识 `twitter` provider。
+如果当前已安装 v1.3.0，只需按第 3 节更新 Edge 扩展、重新加载、重新授权站点权限，然后点击“立即同步”。v1.3.1 没有改变服务端协议或 Native Host，无需重装这两个组件。v1.2.x 及更旧版本则按 **服务端 → Mac Native Host → Edge 扩展** 的完整顺序升级，以获得直接同步、诊断和订阅监控功能。
 
 无需先卸载。保留已有配置、SSH 密钥、站点登录态和服务器 `secrets/rsshub.env`。
 
-## 1. 更新服务器程序
+## 1. 更新服务器程序（仅 v1.2.x 及更旧版本）
 
 先在扩展弹窗关闭自动同步开关，等正在进行的同步结束。然后使用原来的管理员 SSH 连接服务器，例如：
 
@@ -27,7 +27,7 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 普通已完成迁移的重装不会无条件重建 RSSHub。只有检测到实际待完成的 Compose 迁移时，才执行初始化及对应健康检查。等待安装器报告成功后再继续。
 
-## 2. 更新 Mac Native Host
+## 2. 更新 Mac Native Host（仅 v1.2.x 及更旧版本）
 
 回到 Mac 本机终端，以当前普通用户运行，**不要加 sudo**：
 
@@ -41,27 +41,27 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 ## 3. 更新 Edge 扩展
 
-1. 下载 [v1.2.0 扩展 ZIP](https://github.com/Jaaayden/rsshub-cookie-sync/releases/download/v1.2.0/rsshub-cookie-sync-extension.zip)，解压到临时目录。
+1. 下载 [v1.3.1 扩展 ZIP](https://github.com/Jaaayden/rsshub-cookie-sync/releases/download/v1.3.1/rsshub-cookie-sync-extension.zip)，解压到临时目录。
 2. 在 `edge://extensions` 找到 RSSHub Cookie Sync，确认原来加载的扩展目录。用解压后包含 `manifest.json` 的目录内文件替换原扩展目录中的对应文件，避免多套一层目录。
-3. 点击该扩展的“重新加载”，确认页面显示版本 **1.2.0**。不用移除再安装扩展；保留原目录和固定扩展 ID。
+3. 点击该扩展的“重新加载”，确认页面显示版本 **1.3.1**。不用移除再安装扩展；保留原目录和固定扩展 ID。
 4. 打开扩展，进入“连接设置”，点击“重新读取设置”，确认 Native Host 可用，服务器地址、端口和密钥文件名仍正确。
-5. 点击“授权站点权限”，授予新增的 `x.com` 和 `twitter.com` 权限。在同一个 Edge Default Profile 登录 [X](https://x.com)。
-6. 点击“立即同步”。确认 X/Twitter 卡片出现结果后，恢复自动同步开关。
+5. 点击“授权站点权限”，允许知乎和微博新增的精确 HTTP host 权限。Chromium 会根据 Cookie 的 `Secure` 属性检查对应 host 权限，因此这一步用于读取 `d_c0` 等非 Secure Cookie；扩展仍通过 HTTPS URL 查询 Cookie，不会用 HTTP 请求知乎或微博。升级旧于 v1.3.0 的版本时，也授予新增的 `x.com` 和 `twitter.com` 权限，并在同一个 Edge Default Profile 登录 [X](https://x.com)。
+6. 点击“立即同步”。确认知乎、微博（以及已配置 X 时的 X/Twitter）卡片出现结果后，恢复自动同步开关。
 
-可从 [v1.2.0 Release](https://github.com/Jaaayden/rsshub-cookie-sync/releases/tag/v1.2.0) 下载 `SHA256SUMS`；将其与 ZIP 放在同一目录后运行：
+可从 [v1.3.1 Release](https://github.com/Jaaayden/rsshub-cookie-sync/releases/tag/v1.3.1) 下载 `SHA256SUMS`；将其与 ZIP 放在同一目录后运行：
 
 ```sh
 grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 ```
 
-应输出 `OK`。上面的两个安装命令始终安装最新稳定 Release；目前是 v1.2.0，以安装器显示的版本为准。以后有更新版本时，请使用同一版本的扩展及组件。
+应输出 `OK`。上面的两个安装命令始终安装最新稳定 Release；目前是 v1.3.1，以安装器显示的版本为准。以后有更新版本时，请使用同一版本的扩展及组件。
 
 ## 4. 确认升级结果
 
-- “已切换”：新令牌已验证并写入 RSSHub。
-- “候选已保存”：新令牌有效，但已有 live 令牌仍可用，所以暂不替换，属于正常结果。
+- “已切换”：新凭证已写入 RSSHub；默认直接同步模式未验证上游登录态。
+- “候选已保存”：仅显式使用 `verified` 模式时表示已保存通过探针的候选，暂不替换已有 live。
 - “已同步”：令牌与当前 live 或候选相同。
-- “稍后重试”：上游验证、网络或连接暂时失败；查看 [故障排查](troubleshooting.md#xtwitter)，不要反复覆盖 live env。
+- “稍后重试”：凭证不完整、连接或处理失败；查看卡片中的具体原因及[故障排查](troubleshooting.md)，不要反复覆盖 live env。
 
 需要检查服务器状态时，在 root shell 中运行：
 
@@ -71,6 +71,6 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 systemctl is-active rsshub-cookie-sync-monitor.timer
 ```
 
-确认状态中出现 `providers.twitter`，且定时器返回 `active`。“刷新扩展状态”只刷新本地缓存；实际重新读取浏览器并验证需要点击“立即同步”。
+确认状态中出现 `providers.twitter`，且定时器返回 `active`。“刷新扩展状态”只刷新本地缓存；实际重新读取浏览器并上传需要点击“立即同步”。完成同步后检查实际订阅路由，确认 RSSHub 已能抓取内容。
 
-未配置 X 时不会发送 X 登录失效提醒。已有逗号分隔的多账号令牌池会原样保留，状态显示 `twitter_token_pool_unsupported`；本版本不会自动用单个浏览器账号替换它。X 登录验证要求服务器直接访问 `x.com` 和 `api.x.com`，不继承环境代理；接口异常不会被当作登录成功。
+未配置 X 时不会发送 X 登录失效提醒。已有逗号分隔的多账号令牌池会原样保留，状态显示 `twitter_token_pool_unsupported`；本版本不会自动用单个浏览器账号替换它。仅显式使用 `verified` 模式时，X 登录验证要求服务器直接访问 `x.com` 和 `api.x.com`，不继承环境代理；接口异常不会被当作登录成功。

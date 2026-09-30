@@ -5,6 +5,7 @@ import {
   PROVIDERS,
   applicableCookies,
   serializeCookieHeader,
+  prepareZhihuSyncHeader,
   sha256Hex,
 } from './lib/cookies.js';
 import {
@@ -312,9 +313,22 @@ async function performProviderSyncInternal(provider, reason) {
     return { status: collection.error };
   }
 
+  let header = collection.header;
+  if (provider === 'zhihu') {
+    const prepared = prepareZhihuSyncHeader(header);
+    if (prepared.error) {
+      await recordProvider(provider, {
+        result: localFailureResult(prepared.error),
+        now,
+      });
+      return { status: 'retryable_error', reason: prepared.error };
+    }
+    header = prepared.header;
+  }
+
   let hash;
   try {
-    hash = await sha256Hex(collection.header);
+    hash = await sha256Hex(header);
   } catch {
     await recordProvider(provider, {
       result: { status: 'retryable_error', reason: 'hashing_failed' },
@@ -326,7 +340,7 @@ async function performProviderSyncInternal(provider, reason) {
   let response;
   try {
     await logDiagnostic({ provider, trigger: reason === 'manual' ? 'manual' : 'automatic', stage: 'native', status: 'started' });
-    const payload = { ...createSyncPayload({ [provider]: collection.header }), diagnostics: true };
+    const payload = { ...createSyncPayload({ [provider]: header }), diagnostics: true };
     response = await sendNativePayload(payload);
   } catch {
     await recordProvider(provider, {

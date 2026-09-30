@@ -7,6 +7,7 @@ import {
   cookieAppliesToTarget,
   fingerprint,
   isCookieTargetUrl,
+  prepareZhihuSyncHeader,
   serializeCookieHeader,
   sha256Hex,
   validateCookieHeader,
@@ -72,6 +73,41 @@ test('serialization is stable, preserves equals and retains distinct duplicate n
   assert.equal(serializeCookieHeader(records), expected);
   assert.equal(serializeCookieHeader(shuffled), expected);
   assert.equal(serializeCookieHeader([]), '');
+});
+
+test('Zhihu sync preserves device, login and other cookies but refreshes the challenge token in RSSHub', () => {
+  const records = [
+    cookie({ name: '_xsrf', value: 'fake-xsrf', domain: '.zhihu.com', hostOnly: false, secure: false }),
+    cookie({ name: 'd_c0', value: 'fake-device=|1234567890', domain: '.zhihu.com', hostOnly: false, secure: false }),
+    cookie({ name: 'z_c0', value: 'fake-login=a=b', domain: '.zhihu.com', hostOnly: false, httpOnly: true }),
+    cookie({ name: '__zse_ck', value: 'fake-browser-challenge', domain: '.zhihu.com', hostOnly: false }),
+    cookie({ name: 'SESSIONID', value: 'fake-session', secure: false, session: true }),
+    cookie({ name: 'wrong-path', path: '/api/v4' }),
+    cookie({ name: 'wrong-host', domain: 'example.test' }),
+  ];
+  const raw = serializeCookieHeader(applicableCookies('zhihu', records));
+  assert.ok(raw.includes('__zse_ck=fake-browser-challenge'), 'copy/collection retains the original header');
+  assert.deepEqual(prepareZhihuSyncHeader(raw), {
+    header: 'SESSIONID=fake-session; _xsrf=fake-xsrf; d_c0=fake-device=|1234567890; z_c0=fake-login=a=b',
+  });
+});
+
+test('Zhihu sync rejects incomplete or conflicting device/login cookies before uploading', () => {
+  for (const header of ['z_c0=fake-login', 'd_c0=; z_c0=fake-login', 'd_c0=  ; z_c0=fake-login']) {
+    assert.deepEqual(prepareZhihuSyncHeader(header), { error: 'zhihu_missing_dc0' });
+  }
+  for (const header of ['d_c0=fake-device', 'd_c0=fake-device; z_c0=']) {
+    assert.deepEqual(prepareZhihuSyncHeader(header), { error: 'zhihu_missing_zc0' });
+  }
+  for (const header of [
+    'd_c0=fake-one; d_c0=fake-two; z_c0=fake-login',
+    'd_c0=fake-device; z_c0=fake-one; z_c0=fake-two',
+  ]) {
+    assert.deepEqual(prepareZhihuSyncHeader(header), { error: 'zhihu_ambiguous_session' });
+  }
+  assert.deepEqual(prepareZhihuSyncHeader('d_c0=fake-device; z_c0=fake-login; z_c0=fake-login'), {
+    header: 'd_c0=fake-device; z_c0=fake-login; z_c0=fake-login',
+  });
 });
 
 test('malformed cookie parts and injected controls are rejected', () => {

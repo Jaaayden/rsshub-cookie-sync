@@ -30,8 +30,13 @@ export const COOKIE_TARGETS = Object.freeze({
     url: 'https://www.zhihu.com/api/v3/moments',
     host: 'www.zhihu.com',
     path: '/api/v3/moments',
+    // Chromium checks each cookie's origin using its Secure attribute, even
+    // when getAll queries an HTTPS URL. Non-Secure cookies (including d_c0)
+    // therefore need HTTP host permission; collection still uses HTTPS only.
     permissionOrigins: Object.freeze([
+      'http://zhihu.com/*',
       'https://zhihu.com/*',
+      'http://www.zhihu.com/*',
       'https://www.zhihu.com/*',
     ]),
   }),
@@ -40,7 +45,9 @@ export const COOKIE_TARGETS = Object.freeze({
     host: 'm.weibo.cn',
     path: '/feed/group',
     permissionOrigins: Object.freeze([
+      'http://weibo.cn/*',
       'https://weibo.cn/*',
+      'http://m.weibo.cn/*',
       'https://m.weibo.cn/*',
     ]),
   }),
@@ -267,6 +274,32 @@ export function validateCookieHeader(value, { allowEmpty = false } = {}) {
     }
   }
   return value;
+}
+
+/**
+ * Keep Zhihu's login and device cookies together. RSSHub discards an isolated
+ * z_c0 when d_c0 is missing. Let RSSHub generate its own __zse_ck for this
+ * session and user-agent instead of pinning the browser's challenge token.
+ * Other applicable cookies and their values are preserved unchanged.
+ */
+export function prepareZhihuSyncHeader(header) {
+  validateCookieHeader(header);
+  const pairs = header.split(';').map((pair) => pair.trim());
+  for (const [name, reason] of [
+    ['d_c0', 'zhihu_missing_dc0'],
+    ['z_c0', 'zhihu_missing_zc0'],
+  ]) {
+    const values = new Set(pairs
+      .filter((pair) => pair.slice(0, pair.indexOf('=')).trim() === name)
+      .map((pair) => pair.slice(pair.indexOf('=') + 1)));
+    if (values.size === 0 || [...values].some((value) => !value.trim())) {
+      return { error: reason };
+    }
+    if (values.size > 1) return { error: 'zhihu_ambiguous_session' };
+  }
+  return { header: pairs
+    .filter((pair) => pair.slice(0, pair.indexOf('=')).trim() !== '__zse_ck')
+    .join('; ') };
 }
 
 export async function sha256Hex(value, subtle = globalThis.crypto?.subtle) {
