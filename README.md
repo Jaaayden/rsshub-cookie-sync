@@ -52,8 +52,6 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 如果 Compose 文件不在常见位置，安装器会在交互提示中要求输入绝对路径。它不会下载或更新 RSSHub 镜像，也不会连接你的 Mac。
 
-注意：本仓库新增的 `ACCESS_KEY` 自动识别和后续刷新功能尚未包含在 v1.3.1 Release 中；上面的 `releases/latest` 安装命令当前仍会安装 v1.3.1。要使用新命令，需先安装包含本次修复的服务端源码版本，或等待后续 Release。具体见[配置升级说明](docs/upgrade.md)。
-
 ### 第三步：安装 Edge 扩展
 
 回到 Mac，打开 [GitHub Releases](https://github.com/Jaaayden/rsshub-cookie-sync/releases)，下载 `rsshub-cookie-sync-extension.zip`，解压到固定目录。
@@ -133,13 +131,13 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 
 ## X/Twitter 同步与升级
 
-**已安装旧版？按 [从旧版本升级到 v1.2.0](docs/upgrade.md) 操作**：包含服务器和 Mac 更新命令、Edge 原目录替换、新增权限及升级结果检查。
+**已安装旧版？按 [从旧版本升级到 v1.3.2](docs/upgrade.md) 操作**：根据当前版本更新服务端、Mac Native Host 和 Edge 扩展，并检查新增权限和配置刷新结果。
 
 X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸值。手动入口 `manual-update --provider twitter` 的隐藏提示可接受裸值或单个 `auth_token=值`。服务器只把裸值写入 `TWITTER_AUTH_TOKEN`；浏览器里的其他 X Cookie 不会上传。
 
 扩展优先读取 `x.com`，没有 `auth_token` 时再读取 `twitter.com`。两个域不会混合；存在冲突令牌时停止本次采集。自动同步目前支持同一 Edge Default Profile 中的一个账号。
 
-升级到包含此功能的版本时，按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新同一版本的组件，然后重新加载扩展，点击“授权站点权限”授予新增的 X/Twitter 权限。源码版本使用各组件文档中的安装方式；尚未发布的代码不会通过 `releases/latest` 安装。旧组件仍只认识知乎和微博，所以不要仅更新扩展。
+首次升级到支持此功能的版本时，按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新同一版本的组件，然后重新加载扩展，点击“授权站点权限”授予新增的 X/Twitter 权限。旧组件仍只认识知乎和微博，所以不要仅更新扩展。
 
 已有知乎、微博配置和状态无需重建；没有 X 令牌时，服务端保持待同步，不发送 X 登录失效提醒。初始化允许只配置部分 provider。已有逗号分隔的多账号 `TWITTER_AUTH_TOKEN` 会原样保留，但不会自动接管；服务端状态报告 `twitter_token_pool_unsupported`。
 
