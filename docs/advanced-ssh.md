@@ -82,7 +82,8 @@ ID 必须从 Edge 的扩展页面复制，不能凭记忆填写。Native Host ma
 如需手工检查安装位置：
 
 ```text
-~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.jayden.rsshub_cookie_sync.json
+~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/io.github.jaaayden.rsshub_cookie_sync.json
+~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.jayden.rsshub_cookie_sync.json   # v1.4.0 起仅为兼容旧扩展而保留
 ~/Library/Application Support/RSSHub Cookie Sync/native_host
 ~/Library/Application Support/RSSHub Cookie Sync/native_host.py
 ~/Library/Application Support/rsshub-cookie-sync/uninstall.sh

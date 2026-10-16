@@ -119,7 +119,7 @@ gh attestation verify rsshub-cookie-sync-extension.zip --repo Jaaayden/rsshub-co
 - “复制 Cookie”：只有在你明确点击某一个 provider 的按钮、确认警告并授权剪贴板后才会复制该 provider 的 Cookie。这是为了保留手动应急能力的例外；复制后请按下面的隐藏输入流程使用，并及时清理剪贴板。
 - 右上角开关：暂停或恢复自动同步。暂停不影响已经安装在服务器上的监控。
 
-自动同步在 Edge 启动、每 15 分钟以及目标 Cookie 变化后触发。Cookie 变化会等待约 2 分钟合并，避免短时间内重复上传。Edge 关闭或 Mac 睡眠时不会采集，但服务器监控仍会运行。
+自动同步在 Edge 启动、每 15 分钟以及目标 Cookie 变化后触发。Cookie 变化会等待约 2 分钟合并（持续变化时最多等待 10 分钟），避免短时间内重复上传。如果某个站点的 Cookie 与服务器最近一次确认的完全相同，周期检查和 Cookie 变化检查不会再经 SSH 上传；启动、手动同步，以及距上次确认超过 6 小时时仍会上传，保证重装或恢复后的服务器能自行补齐。Edge 关闭或 Mac 睡眠时不会采集，但服务器监控仍会运行。
 
 知乎动态同步要求同一浏览器会话中存在非空的 `d_c0` 和 `z_c0`。缺少其中任一个，或同名 Cookie 存在冲突值时，扩展会在本机停止本次同步，不上传也不更新服务器上的 Cookie。同步上传会省略浏览器里的 `__zse_ck`，由 RSSHub 按当前设备会话生成；其他适用 Cookie 及其值保持原样，包括值中的 `=` 和 `|`。手动“复制 Cookie”仍复制浏览器返回的完整 Cookie，不会省略 `__zse_ck`。关于知乎所需 Cookie 与 `__zse_ck` 的生成方式，见 [RSSHub PR #22319](https://github.com/DIYgod/RSSHub/pull/22319)。
 
@@ -137,7 +137,7 @@ gh attestation verify rsshub-cookie-sync-extension.zip --repo Jaaayden/rsshub-co
 
 ## X/Twitter 同步与升级
 
-**已安装旧版？按 [从旧版本升级到 v1.3.2](docs/upgrade.md) 操作**：根据当前版本更新服务端、Mac Native Host 和 Edge 扩展，并检查新增权限和配置刷新结果。
+**已安装旧版？按 [从旧版本升级到 v1.4.0](docs/upgrade.md) 操作**：按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新三个组件，并检查新增权限和配置刷新结果。v1.4.0 起 Native Host 的注册名称改为 `io.github.jaaayden.rsshub_cookie_sync`，所以必须先更新 Mac Native Host，再更新扩展。
 
 X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸值。手动入口 `manual-update --provider twitter` 的隐藏提示可接受裸值或单个 `auth_token=值`。服务器只把裸值写入 `TWITTER_AUTH_TOKEN`；浏览器里的其他 X Cookie 不会上传。
 
@@ -282,7 +282,7 @@ python3 native-host/install.py --activate-dedicated-key
 
 - 客户端：macOS + Microsoft Edge Chromium + Edge Default Profile；
 - 服务端：Linux、systemd、Docker Engine、Docker Compose v2.30+；
-- 运行时只使用 Python 3.9+ 标准库；Node.js 仅用于扩展测试；
+- 运行时只使用 Python 3.9+ 标准库；Node.js 仅用于扩展测试和 lint；
 - 服务端每 15 分钟检查 RSSHub 及配置的订阅路由；默认不验证上游登录态、不自动切换旧候选；
 - `403`、`429`、`432`、超时和 `5xx` 会被当作临时上游故障，不会立即更换 Cookie；
 - 本项目不自动输入密码，不绕过验证码或 MFA。
@@ -294,9 +294,13 @@ Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 D
 CI 不是安装前提。GitHub Actions 会运行测试，并在版本 Release 中生成可直接加载的扩展 ZIP、供安装器校验的源码包、macOS/服务端一键安装脚本、两端独立卸载入口以及 `SHA256SUMS`。已发布 Release 的资产不会被覆盖；需要修复时发布新的补丁版本。安装器写入的固定卸载程序与它所安装的版本一致；Release 中的 `uninstall-macos.sh` 和 `uninstall-server.sh` 用于独立下载或应急清理。
 
 ```sh
+python3 -m pip install -r requirements-dev.txt   # ruff
+npm ci --prefix extension                         # eslint
 make check
 make package-extension
 ```
+
+`make check` 依次运行 lint、各组件测试，以及保证 Native Host 与服务端校验规则不会漂移的一致性测试。服务端实现位于 `server/rsshub_sync/` 包，入口脚本仍是 `server/rsshub_cookie_sync.py`。
 
 测试使用合成 Cookie，不会连接生产服务器，也不会读取当前浏览器登录态。
 
