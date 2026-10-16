@@ -1295,7 +1295,7 @@ class CommandRunner:
                 check=False,
                 text=True,
             )
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             return CommandResult(124, "", "")
         except OSError:
             return CommandResult(127, "", "")
