@@ -258,7 +258,7 @@ class RSSHubConfigTests(unittest.TestCase):
             "dry_run": True,
         }
         output = io.StringIO()
-        with patch("rsshub_cookie_sync.refresh_rsshub_config", return_value=safe_result) as refresh:
+        with patch("rsshub_sync.cli.refresh_rsshub_config", return_value=safe_result) as refresh:
             with patch("sys.stdout", output):
                 exit_code = sync.main(
                     [
@@ -283,7 +283,7 @@ class RSSHubConfigTests(unittest.TestCase):
     def test_dry_run_is_rejected_for_commands_that_can_write(self):
         errors = io.StringIO()
         with patch("sys.stderr", errors), patch(
-            "rsshub_cookie_sync.make_config",
+            "rsshub_sync.cli.make_config",
             side_effect=AssertionError("must reject before loading a write-capable command"),
         ) as make_config:
             exit_code = sync.main(["apply", "--dry-run"])
