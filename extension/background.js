@@ -23,7 +23,7 @@ import {
   DEFAULT_DEBOUNCE_MS,
   PERIODIC_SYNC_MINUTES,
   createDefaultState,
-  nextDebounceAt,
+  debounceFireAt,
   parseDebounceAlarm,
   sanitizeState,
   updateProviderState,
@@ -34,7 +34,10 @@ const PERIODIC_ALARM = 'rsshub-cookie-sync:periodic';
 const DEBOUNCE_PREFIX = 'rsshub-cookie-sync:debounce:';
 
 let state = createDefaultState();
-let stateLoaded = false;
+let statePromise = null;
+// First cookie change of the current burst, per provider. In-memory only: if
+// the worker is restarted the window simply starts over.
+const debounceBurstStart = new Map();
 let stateWriteQueue = Promise.resolve();
 let syncQueue = Promise.resolve();
 
@@ -107,21 +110,27 @@ function safeLog(event) {
   console.info(`[RSSHub Cookie Sync] ${event}`);
 }
 
-async function loadState() {
-  if (stateLoaded) return state;
-  try {
-    const result = await callChrome(
-      chromeContext().storage.local.get,
-      chromeContext().storage.local,
-      STORAGE_KEY,
-    );
-    state = sanitizeState(result?.[STORAGE_KEY]);
-  } catch {
-    state = createDefaultState();
-    safeLog('state_unavailable');
-  }
-  stateLoaded = true;
-  return state;
+/**
+ * Load persisted state once. The promise is shared so concurrent callers (the
+ * start-up load and an event handler waking the worker) cannot overwrite each
+ * other's in-memory updates with a stale read.
+ */
+function loadState() {
+  statePromise ??= (async () => {
+    try {
+      const result = await callChrome(
+        chromeContext().storage.local.get,
+        chromeContext().storage.local,
+        STORAGE_KEY,
+      );
+      state = sanitizeState(result?.[STORAGE_KEY]);
+    } catch {
+      state = createDefaultState();
+      safeLog('state_unavailable');
+    }
+    return state;
+  })();
+  return statePromise;
 }
 
 function persistState(nextState) {
@@ -415,6 +424,8 @@ async function ensurePeriodicAlarm() {
 
 async function scheduleDebounce(provider) {
   const alarmName = `${DEBOUNCE_PREFIX}${provider}`;
+  const now = Date.now();
+  if (!debounceBurstStart.has(provider)) debounceBurstStart.set(provider, now);
   try {
     await invokeChrome(
       chromeContext().alarms.clear,
@@ -425,7 +436,7 @@ async function scheduleDebounce(provider) {
       chromeContext().alarms.create,
       chromeContext().alarms,
       alarmName,
-      { when: nextDebounceAt(Date.now(), DEFAULT_DEBOUNCE_MS) },
+      { when: debounceFireAt(now, debounceBurstStart.get(provider), DEFAULT_DEBOUNCE_MS) },
     );
   } catch {
     safeLog('debounce_setup_failed');
@@ -515,7 +526,10 @@ function registerListeners() {
       return;
     }
     const provider = parseDebounceAlarm(alarm.name);
-    if (provider) void automaticSync(`cookie_changed:${provider}`, [provider]);
+    if (provider) {
+      debounceBurstStart.delete(provider);
+      void automaticSync(`cookie_changed:${provider}`, [provider]);
+    }
   });
   browser.cookies.onChanged?.addListener((changeInfo) => {
     void (async () => {

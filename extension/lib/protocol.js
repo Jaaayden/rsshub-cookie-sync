@@ -66,22 +66,43 @@ export const DIAGNOSTIC_REASON_LABELS = Object.freeze({
 
 export function diagnosticReasonLabel(reason) {
   if (Object.hasOwn(DIAGNOSTIC_REASON_LABELS, reason)) return DIAGNOSTIC_REASON_LABELS[reason];
-  if (typeof reason === 'string' && /^http_[1-5][0-9]{2}$/u.test(reason)) return `上游返回 HTTP ${reason.slice(5)}`;
+  if (typeof reason === 'string' && HTTP_REASON_RE.test(reason)) return `上游返回 HTTP ${reason.slice(5)}`;
   return sanitizeReason(reason) ?? '未提供具体原因（旧组件可能只返回结果）';
 }
 
+// Reasons the native host or the server may report, and reasons the extension
+// itself records when a local step fails.  Single source of truth: state.js and
+// the diagnostic log sanitizer use the same sets.
+export const HOST_REASONS = Object.freeze([
+  'ok',
+  'invalid_response',
+  'native_host_unavailable',
+  'permission_denied',
+  'missing_cookie',
+  'candidate_invalid',
+  'upstream_temporary_failure',
+  'server_rejected',
+]);
+export const LOCAL_REASONS = Object.freeze([
+  'cookie_read_failed',
+  'permission_check_failed',
+  'malformed_cookie',
+  'hashing_failed',
+]);
+
+const HOST_REASON_SET = new Set(HOST_REASONS);
+const LOCAL_REASON_SET = new Set(LOCAL_REASONS);
+const HTTP_REASON_RE = /^http_[1-5][0-9]{2}$/u;
+
+export function isLocalReason(reason) {
+  return typeof reason === 'string' && LOCAL_REASON_SET.has(reason);
+}
+
 export function sanitizeReason(reason) {
-  const allowed = new Set([
-    'ok',
-    'invalid_response',
-    'native_host_unavailable',
-    'permission_denied',
-    'missing_cookie',
-    'candidate_invalid',
-    'upstream_temporary_failure',
-    'server_rejected',
-  ]);
-  return typeof reason === 'string' && (allowed.has(reason) || Object.hasOwn(DIAGNOSTIC_REASON_LABELS, reason) || /^http_[1-5][0-9]{2}$/u.test(reason)) ? reason : undefined;
+  if (typeof reason !== 'string') return undefined;
+  const known =
+    HOST_REASON_SET.has(reason) || Object.hasOwn(DIAGNOSTIC_REASON_LABELS, reason) || HTTP_REASON_RE.test(reason);
+  return known ? reason : undefined;
 }
 
 /**
@@ -107,18 +128,44 @@ export function sanitizeHostResult(result, provider) {
   return reason ? { status, reason } : { status };
 }
 
-export function sanitizeDiagnosticLog(raw) {
-  if (!Array.isArray(raw)) return [];
-  const stages = new Set(['collect', 'native', 'complete']);
-  const statuses = new Set([...HOST_RESULT_STATUSES, 'started', 'collected', 'permission_required', 'missing_cookie']);
-  const localReasons = new Set(['cookie_read_failed', 'permission_check_failed', 'malformed_cookie', 'hashing_failed']);
-  return raw.slice(-200).filter((entry) => entry && PROVIDERS.includes(entry.provider) && stages.has(entry.stage) && statuses.has(entry.status) && Number.isFinite(entry.time) && entry.time > 0).map((entry) => ({
+const DIAGNOSTIC_STAGES = new Set(['collect', 'native', 'complete']);
+const DIAGNOSTIC_STATUSES = new Set([
+  ...HOST_RESULT_STATUSES,
+  'started',
+  'collected',
+  'permission_required',
+  'missing_cookie',
+]);
+const MAX_DIAGNOSTIC_ENTRIES = 200;
+const MAX_DIAGNOSTIC_DURATION_MS = 24 * 60 * 60 * 1000;
+
+function isValidDiagnosticEntry(entry) {
+  return Boolean(
+    entry &&
+      PROVIDERS.includes(entry.provider) &&
+      DIAGNOSTIC_STAGES.has(entry.stage) &&
+      DIAGNOSTIC_STATUSES.has(entry.status) &&
+      Number.isFinite(entry.time) &&
+      entry.time > 0,
+  );
+}
+
+function sanitizeDiagnosticEntry(entry) {
+  const duration = Number.isFinite(entry.durationMs) && entry.durationMs >= 0
+    ? Math.min(Math.round(entry.durationMs), MAX_DIAGNOSTIC_DURATION_MS)
+    : null;
+  return {
     time: entry.time,
     provider: entry.provider,
-    trigger: ['manual', 'automatic'].includes(entry.trigger) ? entry.trigger : 'automatic',
+    trigger: entry.trigger === 'manual' ? 'manual' : 'automatic',
     stage: entry.stage,
     status: entry.status,
-    reason: sanitizeReason(entry.reason) ?? (localReasons.has(entry.reason) ? entry.reason : null),
-    durationMs: Number.isFinite(entry.durationMs) && entry.durationMs >= 0 ? Math.min(Math.round(entry.durationMs), 86400000) : null,
-  }));
+    reason: sanitizeReason(entry.reason) ?? (isLocalReason(entry.reason) ? entry.reason : null),
+    durationMs: duration,
+  };
+}
+
+export function sanitizeDiagnosticLog(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(-MAX_DIAGNOSTIC_ENTRIES).filter(isValidDiagnosticEntry).map(sanitizeDiagnosticEntry);
 }

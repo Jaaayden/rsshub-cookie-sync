@@ -1,8 +1,17 @@
 import { PROVIDERS } from './cookies.js';
-import { HOST_RESULT_STATUSES, sanitizeHostResult, sanitizeReason } from './protocol.js';
+import {
+  HOST_REASONS,
+  HOST_RESULT_STATUSES,
+  LOCAL_REASONS,
+  sanitizeHostResult,
+  sanitizeReason,
+} from './protocol.js';
 
 export const DEFAULT_DEBOUNCE_MS = 2 * 60 * 1000;
 export const PERIODIC_SYNC_MINUTES = 15;
+// A trailing debounce that is restarted by every change would never fire while
+// cookies keep changing.  Cap the total wait; the periodic sync is the fallback.
+export const MAX_DEBOUNCE_WAIT_MS = 10 * 60 * 1000;
 
 const SAFE_RESULTS = new Set([
   ...HOST_RESULT_STATUSES,
@@ -11,20 +20,7 @@ const SAFE_RESULTS = new Set([
   'paused',
 ]);
 
-const SAFE_REASONS = new Set([
-  'ok',
-  'invalid_response',
-  'native_host_unavailable',
-  'permission_denied',
-  'missing_cookie',
-  'candidate_invalid',
-  'upstream_temporary_failure',
-  'server_rejected',
-  'cookie_read_failed',
-  'permission_check_failed',
-  'malformed_cookie',
-  'hashing_failed',
-]);
+const SAFE_REASONS = new Set([...HOST_REASONS, ...LOCAL_REASONS]);
 
 export function createProviderState() {
   return {
@@ -128,4 +124,14 @@ export function parseDebounceAlarm(name) {
   if (typeof name !== 'string' || !name.startsWith(prefix)) return null;
   const provider = name.slice(prefix.length);
   return PROVIDERS.includes(provider) ? provider : null;
+}
+
+/**
+ * When a debounced sync should fire. Each change pushes the alarm back by
+ * `delayMs`, but never later than `maxWaitMs` after the first change in the
+ * current burst.
+ */
+export function debounceFireAt(now, firstChangeAt, delayMs = DEFAULT_DEBOUNCE_MS, maxWaitMs = MAX_DEBOUNCE_WAIT_MS) {
+  const first = Number.isFinite(firstChangeAt) ? firstChangeAt : now;
+  return Math.floor(Math.max(now, Math.min(now + delayMs, first + maxWaitMs)));
 }
