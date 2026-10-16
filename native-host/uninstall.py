@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 try:
-    from native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME
+    from native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME, LEGACY_HOST_NAMES
 except ImportError:  # pragma: no cover - supports package execution
-    from .native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME  # type: ignore
+    from .native_host import DEFAULT_APP_SUPPORT_DIR, HOST_NAME, LEGACY_HOST_NAMES  # type: ignore
 
 
 DEFAULT_EDGE_MANIFEST_DIR = (
@@ -146,8 +146,10 @@ def uninstall(
 
     removed: list[Path] = []
     manifest_path = edge_manifest_dir / f"{HOST_NAME}.json"
+    legacy_manifest_paths = [edge_manifest_dir / f"{name}.json" for name in LEGACY_HOST_NAMES]
     for path in (
         manifest_path,
+        *legacy_manifest_paths,
         app_support_dir / "native_host",
         app_support_dir / "native_host.py",
         config_path,

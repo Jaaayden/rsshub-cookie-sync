@@ -31,6 +31,7 @@ try:
         DEFAULT_SERVER_USER,
         DEFAULT_EXTENSION_ID,
         HOST_NAME,
+        LEGACY_HOST_NAMES,
         ConfigurationError,
         HostConfig,
         build_ssh_argv,
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover - supports direct path execution
         DEFAULT_SERVER_USER,
         DEFAULT_EXTENSION_ID,
         HOST_NAME,
+        LEGACY_HOST_NAMES,
         ConfigurationError,
         HostConfig,
         build_ssh_argv,
@@ -442,7 +444,6 @@ def _ensure_identity(key_path: Path, *, generate: bool) -> None:
         if info.st_uid != os.getuid():
             raise InstallError("SSH 密钥必须由当前用户拥有")
         os.chmod(key_path, 0o600)
-        public_path = Path(f"{key_path}.pub")
         if key_path.name == DEDICATED_IDENTITY_NAME:
             _validate_dedicated_identity_pair(key_path)
         else:
@@ -499,9 +500,9 @@ def _ensure_known_hosts(
     return False
 
 
-def build_manifest(host_path: Path, extension_id: str) -> Mapping[str, Any]:
+def build_manifest(host_path: Path, extension_id: str, name: str = HOST_NAME) -> Mapping[str, Any]:
     return {
-        "name": HOST_NAME,
+        "name": name,
         "description": "RSSHub Cookie Sync Native Messaging host",
         "path": str(host_path),
         "type": "stdio",
@@ -779,6 +780,10 @@ def install(
         edge_manifest_dir=edge_manifest_dir,
     )
     manifest = build_manifest(launcher_path, extension_id)
+    legacy_manifests = {
+        edge_manifest_dir / f"{legacy_name}.json": build_manifest(launcher_path, extension_id, legacy_name)
+        for legacy_name in LEGACY_HOST_NAMES
+    }
     if not source_uninstall.is_file() or source_uninstall.is_symlink():
         raise InstallError("卸载器源文件不存在或不安全")
 
@@ -800,6 +805,12 @@ def install(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",
         0o600,
     )
+    for legacy_path, legacy_manifest in legacy_manifests.items():
+        _atomic_write_bytes(
+            legacy_path,
+            json.dumps(legacy_manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+            0o600,
+        )
     return {
         "app_support_dir": app_support_dir,
         "host_path": host_path,
@@ -808,6 +819,7 @@ def install(
         "identity_file": selected_identity,
         "known_hosts_file": known_hosts_file,
         "manifest_path": manifest_path,
+        "legacy_manifest_paths": tuple(legacy_manifests),
         "uninstall_dir": uninstall_dir,
         "uninstall_script": uninstall_script,
         "uninstall_python": uninstall_python,

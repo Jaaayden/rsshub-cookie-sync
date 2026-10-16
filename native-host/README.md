@@ -117,7 +117,8 @@ retryable_error
 默认位置：
 
 ```text
-~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.jayden.rsshub_cookie_sync.json
+~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/io.github.jaaayden.rsshub_cookie_sync.json
+~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/com.jayden.rsshub_cookie_sync.json   # 仅为 v1.4.0 之前的旧扩展保留
 ~/Library/Application Support/RSSHub Cookie Sync/native_host.py
 ~/Library/Application Support/RSSHub Cookie Sync/native_host
 ~/Library/Application Support/RSSHub Cookie Sync/config.json
