@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_DEBOUNCE_MS,
   PERIODIC_SYNC_MINUTES,
+  canSkipUpload,
   createDefaultState,
   debounceFireAt,
   parseDebounceAlarm,
@@ -344,6 +345,12 @@ async function performProviderSyncInternal(provider, reason) {
       now,
     });
     return { status: 'hashing_failed' };
+  }
+
+  if (canSkipUpload(state.providers[provider], hash, reason, now)) {
+    // Same Cookie the server already confirmed: record the check, skip SSH.
+    await recordProvider(provider, { hash, now });
+    return { status: state.providers[provider].lastResult, reason: 'unchanged_skipped', reasonSource: reason };
   }
 
   let response;

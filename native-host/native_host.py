@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterable, Mapping, Optional, Sequence, TextIO, Tuple
 
 
-HOST_NAME = "com.jayden.rsshub_cookie_sync"
+HOST_NAME = "io.github.jaaayden.rsshub_cookie_sync"
+# Releases up to v1.3.x registered the host under this name.  The installer
+# keeps a second manifest with the old name pointing at the same launcher so
+# an extension that has not been updated yet keeps working during an upgrade,
+# and the uninstaller removes both.
+LEGACY_HOST_NAMES = ("com.jayden.rsshub_cookie_sync",)
 DEFAULT_SERVER_PORT = 22
 DEFAULT_SERVER_USER = "rsshub-sync"
 DEFAULT_CONNECT_TIMEOUT = 15

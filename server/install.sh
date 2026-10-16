@@ -353,6 +353,13 @@ for source_file in \
     rsshub-cookie-sync-monitor.timer; do
     assert_source_file "$SCRIPT_DIR/$source_file"
 done
+# The Python implementation is a package next to the entry script.  Every
+# module is checked like any other installed source file.
+assert_root_dir "$SCRIPT_DIR/rsshub_sync"
+assert_source_file "$SCRIPT_DIR/rsshub_sync/__init__.py"
+for source_file in "$SCRIPT_DIR"/rsshub_sync/*.py; do
+    assert_source_file "$source_file"
+done
 
 assert_root_chain "$COMPOSE_DIR"
 assert_root_file "$COMPOSE_FILE"
@@ -667,11 +674,13 @@ legacy_assets_match() {
     [ -f "$CONFIG_FILE" ] && [ -f "$SSH_CONFIG" ] \
         && [ -f "$SERVICE_UNIT" ] && [ -f "$TIMER_UNIT" ] \
         && [ -f "$INSTALL_DIR/rsshub_cookie_sync.py" ] \
+        && [ -d "$INSTALL_DIR/rsshub_sync" ] \
         && [ -f "$INSTALL_DIR/rsshub-cookie-sync" ] \
         && [ -f "$SBIN_DIR/rsshub-cookie-sync-apply" ] \
         && [ -f "$SBIN_DIR/rsshub-cookie-sync-provision-key" ] \
         && [ -f /etc/sudoers.d/rsshub-cookie-sync ] || return 1
     cmp -s "$SCRIPT_DIR/rsshub_cookie_sync.py" "$INSTALL_DIR/rsshub_cookie_sync.py" || return 1
+    diff -rq -x __pycache__ "$SCRIPT_DIR/rsshub_sync" "$INSTALL_DIR/rsshub_sync" >/dev/null 2>&1 || return 1
     cmp -s "$SCRIPT_DIR/rsshub-cookie-sync" "$INSTALL_DIR/rsshub-cookie-sync" || return 1
     cmp -s "$SCRIPT_DIR/rsshub-cookie-sync-apply" "$SBIN_DIR/rsshub-cookie-sync-apply" || return 1
     cmp -s "$SCRIPT_DIR/provision-ssh-key.sh" "$SBIN_DIR/rsshub-cookie-sync-provision-key" || return 1
@@ -773,8 +782,32 @@ restore_managed_asset() {
     fi
 }
 
+# Directory variant for the Python package.  The whole directory is replaced
+# on install and put back (or removed) on rollback.
+backup_managed_dir() {
+    asset_target=$1
+    asset_name=$2
+    if [ -e "$asset_target" ] || [ -L "$asset_target" ]; then
+        assert_root_dir "$asset_target"
+        cp -pR "$asset_target" "$asset_backup_dir/$asset_name"
+        install -m 0600 /dev/null "$asset_backup_dir/$asset_name.existed"
+    fi
+    install -m 0600 /dev/null "$asset_backup_dir/$asset_name.checked"
+}
+
+restore_managed_dir() {
+    asset_target=$1
+    asset_name=$2
+    [ -f "$asset_backup_dir/$asset_name.checked" ] || return 0
+    rm -rf "$asset_target"
+    if [ -f "$asset_backup_dir/$asset_name.existed" ]; then
+        cp -pR "$asset_backup_dir/$asset_name" "$asset_target"
+    fi
+}
+
 restore_installed_assets() {
     [ -n "$asset_backup_dir" ] || return 0
+    restore_managed_dir "$INSTALL_DIR/rsshub_sync" package
     restore_managed_asset "$INSTALL_DIR/rsshub_cookie_sync.py" python
     restore_managed_asset "$INSTALL_DIR/rsshub-cookie-sync" launcher
     restore_managed_asset "$SBIN_DIR/rsshub-cookie-sync-apply" apply
@@ -1045,6 +1078,7 @@ fi
 # Install the application before the first Python command.  These paths are
 # root-owned and contain no runtime Cookie values.
 asset_backup_dir=$(mktemp -d /tmp/rsshub-cookie-sync-assets.XXXXXX)
+backup_managed_dir "$INSTALL_DIR/rsshub_sync" package
 backup_managed_asset "$INSTALL_DIR/rsshub_cookie_sync.py" python
 backup_managed_asset "$INSTALL_DIR/rsshub-cookie-sync" launcher
 backup_managed_asset "$SBIN_DIR/rsshub-cookie-sync-apply" apply
@@ -1054,6 +1088,13 @@ backup_managed_asset /etc/sudoers.d/rsshub-cookie-sync sudoers
 install -d -m 0755 "$INSTALL_DIR" "$SBIN_DIR"
 install -d -m 0700 "$CONFIG_DIR" "$STATE_DIR"
 install -d -m 0700 "$SECRETS_DIR" "$CANDIDATE_DIR"
+# Replace the package wholesale so a module removed in a newer release cannot
+# linger and be imported.
+rm -rf "$INSTALL_DIR/rsshub_sync"
+install -d -m 0755 "$INSTALL_DIR/rsshub_sync"
+for module_file in "$SCRIPT_DIR"/rsshub_sync/*.py; do
+    install -m 0644 "$module_file" "$INSTALL_DIR/rsshub_sync/$(basename -- "$module_file")"
+done
 install -m 0755 "$SCRIPT_DIR/rsshub_cookie_sync.py" "$INSTALL_DIR/rsshub_cookie_sync.py"
 install -m 0755 "$SCRIPT_DIR/rsshub-cookie-sync" "$INSTALL_DIR/rsshub-cookie-sync"
 install -m 0755 "$SCRIPT_DIR/rsshub-cookie-sync-apply" "$SBIN_DIR/rsshub-cookie-sync-apply"

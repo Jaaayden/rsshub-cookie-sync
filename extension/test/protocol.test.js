@@ -19,7 +19,7 @@ test('native payload has a fixed version and only supported providers', () => {
       },
     },
   );
-  assert.equal(NATIVE_HOST_NAME, 'com.jayden.rsshub_cookie_sync');
+  assert.equal(NATIVE_HOST_NAME, 'io.github.jaaayden.rsshub_cookie_sync');
   assert.deepEqual(HOST_RESULT_STATUSES, [
     'unchanged',
     'candidate_saved',

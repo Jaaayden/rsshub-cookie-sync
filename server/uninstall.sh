@@ -441,6 +441,22 @@ if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
             rm -f "$managed_file"
         fi
     done
+    # The Python package: remove the known module files and the bytecode cache
+    # Python created next to them, then the directory if nothing else is in it.
+    package_dir=$INSTALL_DIR/rsshub_sync
+    if [ -e "$package_dir" ] || [ -L "$package_dir" ]; then
+        assert_removable_dir "$package_dir"
+        for managed_file in "$package_dir"/*.py; do
+            [ -e "$managed_file" ] || [ -L "$managed_file" ] || continue
+            assert_removable_file "$managed_file"
+            rm -f "$managed_file"
+        done
+        if [ -d "$package_dir/__pycache__" ] && [ ! -L "$package_dir/__pycache__" ]; then
+            rm -f "$package_dir"/__pycache__/*.pyc
+            rmdir "$package_dir/__pycache__" 2>/dev/null || true
+        fi
+        rmdir "$package_dir" 2>/dev/null || true
+    fi
     rmdir "$INSTALL_DIR" 2>/dev/null || true
 fi
 

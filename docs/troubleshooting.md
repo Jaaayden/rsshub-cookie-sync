@@ -48,7 +48,8 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 然后在 `edge://extensions` 点击扩展“重新加载”。检查以下两点：
 
-- Native Messaging manifest 的文件名为 `com.jayden.rsshub_cookie_sync.json`；
+- Native Messaging manifest 的文件名为 `io.github.jaaayden.rsshub_cookie_sync.json`（v1.4.0 之前是 `com.jayden.rsshub_cookie_sync.json`，新版安装器会同时保留旧名称的 manifest，让尚未更新的旧扩展继续可用）；
+- 如果更新扩展后提示 Native Host 不可用，说明 Mac 上还是旧版 Native Host：先重新运行 Mac 一键安装命令，再重新加载扩展；
 - `allowed_origins` 中的扩展 ID 与 Edge 页面显示的 ID 完全一致。
 
 如果使用自定义扩展，必须在安装时传入该扩展 ID；官方扩展不需要传参数。

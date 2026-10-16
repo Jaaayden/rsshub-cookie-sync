@@ -276,6 +276,67 @@ class InstallAssetTests(unittest.TestCase):
     def _source(path: Path) -> str:
         return path.read_text(encoding="utf-8")
 
+    def test_python_package_is_installed_checked_and_removed_with_the_entry_script(self):
+        install = self._source(INSTALL_SCRIPT)
+        uninstall = self._source(UNINSTALL_SCRIPT)
+        self.assertTrue((SERVER_DIR / "rsshub_sync" / "__init__.py").is_file())
+        self.assertIn('assert_source_file "$source_file"', install)
+        self.assertIn('"$SCRIPT_DIR"/rsshub_sync/*.py', install)
+        self.assertIn('backup_managed_dir "$INSTALL_DIR/rsshub_sync" package', install)
+        self.assertIn('restore_managed_dir "$INSTALL_DIR/rsshub_sync" package', install)
+        self.assertIn('package_dir=$INSTALL_DIR/rsshub_sync', uninstall)
+
+    def test_package_backup_and_restore_helpers_roll_back_exactly(self):
+        """Run the real helper functions against a temporary directory tree."""
+        source = self._source(INSTALL_SCRIPT)
+        functions = []
+        for name in ("backup_managed_dir", "restore_managed_dir"):
+            match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.S | re.M)
+            self.assertIsNotNone(match, name)
+            functions.append(match.group(0))
+        script = "set -eu\ndie() { echo \"$*\" >&2; exit 1; }\nassert_root_dir() { [ -d \"$1\" ]; }\n" + "\n".join(functions) + textwrap.dedent(
+            '''
+            root=$1
+            asset_backup_dir=$root/backup
+            mkdir -p "$asset_backup_dir" "$root/lib/pkg"
+            printf old > "$root/lib/pkg/a.py"
+
+            # Upgrade that fails: the old package comes back byte for byte.
+            backup_managed_dir "$root/lib/pkg" package
+            rm -rf "$root/lib/pkg"; mkdir "$root/lib/pkg"; printf new > "$root/lib/pkg/b.py"
+            restore_managed_dir "$root/lib/pkg" package
+            [ "$(cat "$root/lib/pkg/a.py")" = old ]
+            [ ! -e "$root/lib/pkg/b.py" ]
+
+            # First install that fails: the half-installed package is removed.
+            backup_managed_dir "$root/lib/fresh" fresh
+            mkdir "$root/lib/fresh"; printf x > "$root/lib/fresh/c.py"
+            restore_managed_dir "$root/lib/fresh" fresh
+            [ ! -e "$root/lib/fresh" ]
+            '''
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["sh", "-c", script, "sh", temp], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_entry_script_runs_standalone_next_to_its_package(self):
+        """The installed layout is the entry script plus rsshub_sync/ and nothing else."""
+        import shutil
+
+        with tempfile.TemporaryDirectory() as temp:
+            installed = Path(temp) / "installed"
+            installed.mkdir()
+            shutil.copy(SERVER_DIR / "rsshub_cookie_sync.py", installed)
+            shutil.copytree(SERVER_DIR / "rsshub_sync", installed / "rsshub_sync", ignore=shutil.ignore_patterns("__pycache__"))
+            elsewhere = Path(temp) / "elsewhere"
+            elsewhere.mkdir()
+            result = subprocess.run(
+                ["python3", str(installed / "rsshub_cookie_sync.py"), "--help"],
+                cwd=elsewhere, capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")},
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage:", result.stdout)
+
     def test_shell_assets_have_valid_sh_syntax(self):
         """Every installer, uninstaller, and shell wrapper parses as POSIX sh."""
         for path in SHELL_ASSETS:
@@ -496,7 +557,7 @@ class InstallAssetTests(unittest.TestCase):
             root = Path(temporary)
             command_bin = _fake_command_bin(root)
             source = _rewrite_server_script(self._source(UNINSTALL_SCRIPT), root, command_bin)
-            deployment = self._write_fake_deployment(root, include_account=True)
+            self._write_fake_deployment(root, include_account=True)
             authorized_keys = root / "var" / "lib" / "rsshub-sync" / ".ssh" / "authorized_keys"
             userdel_sentinel = root / "userdel-called"
 

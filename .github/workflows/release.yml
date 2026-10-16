@@ -39,6 +39,11 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Install lint tools
+        run: |
+          python3 -m pip install -r requirements-dev.txt
+          npm ci --prefix extension
+
       - name: Validate release entrypoints and scan for secrets
         run: python3 scripts/check-repo-hygiene.py
 

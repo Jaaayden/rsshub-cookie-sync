@@ -478,7 +478,7 @@ class ServerTests(unittest.TestCase):
         # opt-out cannot regress to environment proxy discovery.
         from urllib.request import build_opener
 
-        with patch("rsshub_cookie_sync.build_opener", wraps=build_opener) as build:
+        with patch("rsshub_sync.transport.build_opener", wraps=build_opener) as build:
             HTTPTransport()
         proxy = build.call_args.args[0]
         self.assertIsInstance(proxy, ProxyHandler)
@@ -525,8 +525,8 @@ class ServerTests(unittest.TestCase):
             entered.append(path)
             yield
 
-        with patch("rsshub_cookie_sync.file_lock", recording_lock), patch(
-            "rsshub_cookie_sync.migrate_compose_file",
+        with patch("rsshub_sync.cli.file_lock", recording_lock), patch(
+            "rsshub_sync.cli.migrate_compose_file",
             return_value={"migrated": [], "compose_changed": False, "migration_pending": False},
         ):
             install_cli(args)
@@ -618,8 +618,8 @@ class ServerTests(unittest.TestCase):
         with (
             patch.object(rsshub_cookie_sync.sys.stdin, "isatty", return_value=True),
             patch.object(rsshub_cookie_sync.getpass, "getpass", return_value=ZH_NEW) as hidden_prompt,
-            patch.object(rsshub_cookie_sync, "make_config", return_value=self.config),
-            patch.object(rsshub_cookie_sync, "SyncService", return_value=self.service),
+            patch("rsshub_sync.cli.make_config", return_value=self.config),
+            patch("rsshub_sync.cli.SyncService", return_value=self.service),
             patch.object(rsshub_cookie_sync.sys, "stdout", output),
         ):
             exit_code = rsshub_cookie_sync.main(
@@ -844,7 +844,7 @@ class ServerTests(unittest.TestCase):
         save_state(self.config.state_file, state)
 
         self.transport.zhihu_old_auth_failures = 2
-        with patch("rsshub_cookie_sync.secure_remove", side_effect=SyncError("cannot remove candidate")) as scrub:
+        with patch("rsshub_sync.service.secure_remove", side_effect=SyncError("cannot remove candidate")) as scrub:
             result = self.apply_payload({"zhihu": {"cookieHeader": ZH_OLD}})
 
         self.assertEqual(result["status"], "retryable_error")

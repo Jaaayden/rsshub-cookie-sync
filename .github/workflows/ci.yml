@@ -45,6 +45,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install lint tools
+        run: |
+          python3 -m pip install -r requirements-dev.txt
+          npm ci --prefix extension
+
       # Release entrypoints are public source.  Keep deployment-specific
       # addresses and credentials out of every tracked file.
       - name: Validate release entrypoints and scan for secrets

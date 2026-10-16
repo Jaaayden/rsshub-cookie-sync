@@ -3,17 +3,19 @@ SHELL := /bin/sh
 PYTHON ?= python3
 NPM ?= npm
 
-.PHONY: test test-extension test-native-host test-server check package-extension help
+.PHONY: test test-extension test-native-host test-server test-contract lint check package-extension help
 
 help:
 	@echo 'make test             运行扩展、Native Host、服务端的全部测试'
 	@echo 'make test-extension   只运行 Edge 扩展测试'
 	@echo 'make test-native-host 只运行 Native Messaging Host 测试'
 	@echo 'make test-server      只运行服务端测试'
-	@echo 'make check            运行 Python 语法检查和全部测试'
+	@echo 'make test-contract    运行 Native Host 与服务端的校验一致性测试'
+	@echo 'make lint             运行 ruff 与 eslint（需先 pip install -r requirements-dev.txt 和 cd extension && npm ci）'
+	@echo 'make check            运行 Python 语法检查、lint 和全部测试'
 	@echo 'make package-extension 打包可安装的 Edge 扩展 ZIP'
 
-test: test-extension test-native-host test-server
+test: test-extension test-native-host test-server test-contract
 
 test-extension:
 	@test -f extension/package.json || { echo '缺少 extension/package.json'; exit 1; }
@@ -27,8 +29,18 @@ test-server:
 	@test -d server || { echo '缺少 server/'; exit 1; }
 	@$(PYTHON) -m unittest discover -s server/tests -p 'test_*.py' -v
 
+test-contract:
+	@$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+
+lint:
+	@$(PYTHON) -m ruff --version >/dev/null 2>&1 || { echo '缺少 ruff：pip install -r requirements-dev.txt'; exit 1; }
+	@test -d extension/node_modules/eslint || { echo '缺少 eslint：cd extension && npm ci'; exit 1; }
+	@$(PYTHON) -m ruff check .
+	@cd extension && $(NPM) run --silent lint
+
 check:
 	@PYTHONPYCACHEPREFIX="$(CURDIR)/.cache/pycache" $(PYTHON) -m compileall -q native-host server
+	@$(MAKE) lint
 	@$(MAKE) test
 
 package-extension:

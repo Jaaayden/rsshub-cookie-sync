@@ -33,7 +33,7 @@ class InstallTests(unittest.TestCase):
 
     def test_manifest_has_exact_extension_origin(self) -> None:
         manifest = install.build_manifest(self.app_dir / "native_host.py", self.extension_id)
-        self.assertEqual(manifest["name"], "com.jayden.rsshub_cookie_sync")
+        self.assertEqual(manifest["name"], "io.github.jaaayden.rsshub_cookie_sync")
         self.assertEqual(manifest["type"], "stdio")
         self.assertEqual(
             manifest["allowed_origins"], [f"chrome-extension://{self.extension_id}/"]
@@ -86,6 +86,15 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(paths["known_hosts_ready"])
         self.assertEqual(stat.S_IMODE(paths["config_path"].stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(paths["manifest_path"].stat().st_mode), 0o600)
+        # An extension that still uses the pre-1.4 host name keeps working:
+        # a second manifest with the old name launches the same program.
+        (legacy_path,) = paths["legacy_manifest_paths"]
+        self.assertEqual(legacy_path.name, "com.jayden.rsshub_cookie_sync.json")
+        legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+        current = json.loads(paths["manifest_path"].read_text(encoding="utf-8"))
+        self.assertEqual(legacy["name"], "com.jayden.rsshub_cookie_sync")
+        self.assertEqual({k: v for k, v in legacy.items() if k != "name"}, {k: v for k, v in current.items() if k != "name"})
+        self.assertEqual(stat.S_IMODE(legacy_path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(paths["host_path"].stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(paths["launcher_path"].stat().st_mode), 0o700)
         self.assertTrue(paths["uninstall_script"].is_file())
@@ -102,7 +111,7 @@ class InstallTests(unittest.TestCase):
         self.assertIn("def run_host(", installed_host)
         self.assertNotIn("def install(", installed_host)
         config = json.loads(paths["config_path"].read_text(encoding="utf-8"))
-        self.assertEqual(config["host_name"], "com.jayden.rsshub_cookie_sync")
+        self.assertEqual(config["host_name"], "io.github.jaaayden.rsshub_cookie_sync")
         self.assertEqual(config["server"]["host"], self.server_host)
         self.assertNotIn("proxy", config)
         self.assertEqual(config["ssh"]["identity_file"], str(identity))
@@ -224,8 +233,10 @@ class InstallTests(unittest.TestCase):
             encoding="ascii",
         )
         self.edge_dir.mkdir(parents=True)
-        manifest = self.edge_dir / "com.jayden.rsshub_cookie_sync.json"
+        manifest = self.edge_dir / "io.github.jaaayden.rsshub_cookie_sync.json"
         manifest.write_text("{}", encoding="ascii")
+        legacy_manifest = self.edge_dir / "com.jayden.rsshub_cookie_sync.json"
+        legacy_manifest.write_text("{}", encoding="ascii")
         uninstall_dir = self.root / "Library" / "Application Support" / "rsshub-cookie-sync"
         uninstall_dir.mkdir(parents=True)
         for name in ("uninstall.sh", "uninstall.py", "native_host.py"):
@@ -246,7 +257,8 @@ class InstallTests(unittest.TestCase):
             uninstall_dir=uninstall_dir,
             allowed_root=self.root,
         )
-        self.assertEqual(len(removed), 7)
+        self.assertEqual(len(removed), 8)
+        self.assertFalse(legacy_manifest.exists())
         self.assertTrue(unrelated.exists())
         self.assertTrue(dedicated.exists())
         self.assertTrue(dedicated.with_name("rsshub-cookie-sync.pub").exists())
