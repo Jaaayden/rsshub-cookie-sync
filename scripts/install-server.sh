@@ -7,8 +7,10 @@ set -eu
 #   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh
 #   curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download/install-server.sh | sh -s -- uninstall
 #
-# The bootstrap installs only the latest stable GitHub release.  It never
-# silently falls back to the mutable main branch.  The downloaded installer
+# The bootstrap installs only the latest stable GitHub release.  It downloads
+# the release's source tarball together with SHA256SUMS and refuses to extract
+# anything whose checksum does not match.  It never silently falls back to the
+# mutable main branch.  The downloaded installer
 # reads its questions from /dev/tty, so this also works when the bootstrap
 # itself is supplied through a pipe.
 
@@ -27,40 +29,39 @@ command -v curl >/dev/null 2>&1 || die "缺少 curl"
 command -v tar >/dev/null 2>&1 || die "缺少 tar"
 command -v find >/dev/null 2>&1 || die "缺少 find"
 command -v mktemp >/dev/null 2>&1 || die "缺少 mktemp"
-command -v sed >/dev/null 2>&1 || die "缺少 sed"
-command -v head >/dev/null 2>&1 || die "缺少 head"
 command -v awk >/dev/null 2>&1 || die "缺少 awk"
+command -v sha256sum >/dev/null 2>&1 || die "缺少 sha256sum"
 
-REPOSITORY=https://github.com/Jaaayden/rsshub-cookie-sync
-API_URL=https://api.github.com/repos/Jaaayden/rsshub-cookie-sync/releases/latest
+# Both files are fetched from the same "latest" release.  If a new release is
+# published between the two requests the checksum simply fails to match and
+# nothing is installed.  Using the redirecting download URL also avoids the
+# unauthenticated GitHub API, which is rate limited per IP address.
+RELEASE_URL=https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download
+SOURCE_NAME=rsshub-cookie-sync-source.tar.gz
 # server/install.sh deliberately rejects source trees below a world-writable
 # parent.  Keep the downloaded code below root's private home so that the
 # one-command path passes the same source-integrity check as a manual install.
 TEMP_DIR=$(mktemp -d /root/.rsshub-cookie-sync-install.XXXXXX)
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
-ARCHIVE_URL=
-LATEST_JSON=
-if LATEST_JSON=$(curl -fsSL --proto '=https' --tlsv1.2 \
-    -H 'Accept: application/vnd.github+json' "$API_URL" 2>/dev/null); then
-    # The tag is constrained before it is interpolated into a URL.  Do not
-    # trust arbitrary JSON fields as shell code or as a filesystem path.
-    RELEASE_TAG=$(printf '%s\n' "$LATEST_JSON" | sed -n \
-        's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' | head -n 1)
-    case "$RELEASE_TAG" in
-        v[0-9]*) ARCHIVE_URL="$REPOSITORY/archive/refs/tags/$RELEASE_TAG.tar.gz" ;;
-    esac
-fi
-
-[ -n "$ARCHIVE_URL" ] || die "无法确定最新稳定版本；为安全起见不会自动改用 main，请稍后重试"
-
-ARCHIVE_FILE=$TEMP_DIR/source.tar.gz
+ARCHIVE_FILE=$TEMP_DIR/$SOURCE_NAME
 echo "正在下载 RSSHub Cookie Sync 安装程序。" >&2
-curl -fsSL --proto '=https' --tlsv1.2 "$ARCHIVE_URL" -o "$ARCHIVE_FILE" \
-    || die "源码下载失败"
+curl -fsSL --proto '=https' --tlsv1.2 "$RELEASE_URL/$SOURCE_NAME" -o "$ARCHIVE_FILE" \
+    || die "源码下载失败；请确认最新 Release 已发布"
+curl -fsSL --proto '=https' --tlsv1.2 "$RELEASE_URL/SHA256SUMS" -o "$TEMP_DIR/SHA256SUMS" \
+    || die "校验文件下载失败"
+
+# Verify before the archive is even listed, let alone extracted as root.
+EXPECTED_SHA=$(awk -v name="$SOURCE_NAME" '$2 == name { print $1; exit }' "$TEMP_DIR/SHA256SUMS")
+case "$EXPECTED_SHA" in
+    *[!0-9a-f]*|"") die "SHA256SUMS 中没有有效的源码校验值" ;;
+esac
+[ "${#EXPECTED_SHA}" -eq 64 ] || die "SHA256SUMS 中没有有效的源码校验值"
+ACTUAL_SHA=$(sha256sum "$ARCHIVE_FILE" | awk '{ print $1 }')
+[ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || die "源码归档校验失败，已停止安装"
 
 # Refuse absolute paths, parent traversal, and links before extracting an
-# archive as root.  GitHub source archives contain only one top-level folder,
+# archive as root.  The release source tarball contains only one top-level folder,
 # regular files, and directories; anything else is unexpected here.
 if ! tar -tzf "$ARCHIVE_FILE" | awk '
     BEGIN { ok = 1 }

@@ -26,9 +26,14 @@ command -v curl >/dev/null 2>&1 || die "缺少 curl"
 command -v tar >/dev/null 2>&1 || die "缺少 tar"
 command -v find >/dev/null 2>&1 || die "缺少 find"
 command -v mktemp >/dev/null 2>&1 || die "缺少 mktemp"
-command -v sed >/dev/null 2>&1 || die "缺少 sed"
-command -v head >/dev/null 2>&1 || die "缺少 head"
 command -v awk >/dev/null 2>&1 || die "缺少 awk"
+if command -v shasum >/dev/null 2>&1; then
+    sha256_of() { shasum -a 256 "$1" | awk '{ print $1 }'; }
+elif command -v sha256sum >/dev/null 2>&1; then
+    sha256_of() { sha256sum "$1" | awk '{ print $1 }'; }
+else
+    die "缺少 shasum 或 sha256sum"
+fi
 command -v uname >/dev/null 2>&1 || die "缺少 uname"
 
 [ "$(uname -s)" = "Darwin" ] || die "此安装器仅支持 macOS (Darwin)"
@@ -57,26 +62,28 @@ if [ "$ACTION" = uninstall ] && [ -e "$INSTALLED_UNINSTALLER" ]; then
     exit $?
 fi
 
-REPOSITORY=https://github.com/Jaaayden/rsshub-cookie-sync
-API_URL=https://api.github.com/repos/Jaaayden/rsshub-cookie-sync/releases/latest
+# Both files come from the same "latest" release; if a new release appears
+# between the two requests the checksum fails to match and nothing is
+# installed.  The redirecting download URL also avoids the rate-limited
+# unauthenticated GitHub API.
+RELEASE_URL=https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/download
+SOURCE_NAME=rsshub-cookie-sync-source.tar.gz
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rsshub-cookie-sync.XXXXXX")
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
-LATEST_JSON=$(curl -fsSL --proto '=https' --tlsv1.2 \
-    -H 'Accept: application/vnd.github+json' "$API_URL" 2>/dev/null) \
-    || die "无法获取最新稳定版本"
-RELEASE_TAG=$(printf '%s\n' "$LATEST_JSON" | sed -n \
-    's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' | head -n 1)
-case "$RELEASE_TAG" in
-    v[0-9]*) : ;;
-    *) die "最新 Release 标签格式不合法" ;;
-esac
+ARCHIVE_FILE=$TEMP_DIR/$SOURCE_NAME
+echo "正在下载 RSSHub Cookie Sync。" >&2
+curl -fsSL --proto '=https' --tlsv1.2 "$RELEASE_URL/$SOURCE_NAME" \
+    -o "$ARCHIVE_FILE" || die "源码下载失败；请确认最新 Release 已发布"
+curl -fsSL --proto '=https' --tlsv1.2 "$RELEASE_URL/SHA256SUMS" \
+    -o "$TEMP_DIR/SHA256SUMS" || die "校验文件下载失败"
 
-ARCHIVE_FILE=$TEMP_DIR/source.tar.gz
-echo "正在下载 RSSHub Cookie Sync $RELEASE_TAG。" >&2
-curl -fsSL --proto '=https' --tlsv1.2 \
-    "$REPOSITORY/archive/refs/tags/$RELEASE_TAG.tar.gz" \
-    -o "$ARCHIVE_FILE" || die "源码下载失败"
+EXPECTED_SHA=$(awk -v name="$SOURCE_NAME" '$2 == name { print $1; exit }' "$TEMP_DIR/SHA256SUMS")
+case "$EXPECTED_SHA" in
+    *[!0-9a-f]*|"") die "SHA256SUMS 中没有有效的源码校验值" ;;
+esac
+[ "${#EXPECTED_SHA}" -eq 64 ] || die "SHA256SUMS 中没有有效的源码校验值"
+[ "$(sha256_of "$ARCHIVE_FILE")" = "$EXPECTED_SHA" ] || die "源码归档校验失败，已停止安装"
 
 # Refuse absolute paths, traversal, duplicate separators, and links/special
 # files before extracting an archive supplied by the network.

@@ -73,6 +73,12 @@ grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -
 
 输出 `OK` 才表示下载文件与 Release 中的校验值一致。
 
+一键安装器会自动下载同一 Release 的源码包 `rsshub-cookie-sync-source.tar.gz` 和 `SHA256SUMS`，校验通过后才会解压并运行；校验失败时不会安装任何内容。此外，Release 资产带有 GitHub 构建来源证明，已安装 [GitHub CLI](https://cli.github.com/) 的用户可以核对文件确实由本仓库的 Release 工作流构建：
+
+```sh
+gh attestation verify rsshub-cookie-sync-extension.zip --repo Jaaayden/rsshub-cookie-sync
+```
+
 ### 第四步：确认 Native Host、填写连接设置并同步
 
 打开扩展，进入“连接设置”，点击“重新读取设置”。这个按钮会通过 Native Host 读取本机连接配置；能够成功显示设置，才表示 Native Host 已安装且可用。弹窗里的“刷新扩展状态”不是 Host 检查：它只重新读取后台已经保存的本地脱敏状态，不调用 Native Host、不读取 Cookie，也不会上传或启动 SSH。
@@ -285,7 +291,7 @@ Cookie 最终会进入 RSSHub 容器的进程环境。拥有服务器 root 或 D
 
 ## 开发、测试和打包
 
-CI 不是安装前提。GitHub Actions 会运行测试，并在版本 Release 中生成可直接加载的扩展 ZIP、macOS/服务端一键安装脚本、两端独立卸载入口以及 `SHA256SUMS`。安装器写入的固定卸载程序与它所安装的版本一致；Release 中的 `uninstall-macos.sh` 和 `uninstall-server.sh` 用于独立下载或应急清理。
+CI 不是安装前提。GitHub Actions 会运行测试，并在版本 Release 中生成可直接加载的扩展 ZIP、供安装器校验的源码包、macOS/服务端一键安装脚本、两端独立卸载入口以及 `SHA256SUMS`。已发布 Release 的资产不会被覆盖；需要修复时发布新的补丁版本。安装器写入的固定卸载程序与它所安装的版本一致；Release 中的 `uninstall-macos.sh` 和 `uninstall-server.sh` 用于独立下载或应急清理。
 
 ```sh
 make check

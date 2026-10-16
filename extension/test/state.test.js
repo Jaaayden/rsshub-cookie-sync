@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_DEBOUNCE_MS,
+  MAX_DEBOUNCE_WAIT_MS,
   createDefaultState,
+  debounceFireAt,
   nextDebounceAt,
   parseDebounceAlarm,
   sanitizeState,
@@ -65,4 +67,18 @@ test('debounce deadline and alarm parsing are deterministic', () => {
   assert.equal(parseDebounceAlarm('rsshub-cookie-sync:debounce:tiktok'), null);
   assert.equal(parseDebounceAlarm('periodic'), null);
   assert.throws(() => nextDebounceAt(Number.NaN), /finite/);
+});
+
+test('a burst of cookie changes cannot postpone the debounced sync forever', () => {
+  const start = 1_000_000;
+  // The first change schedules the normal delay.
+  assert.equal(debounceFireAt(start, start), start + DEFAULT_DEBOUNCE_MS);
+  // Later changes keep pushing it back...
+  const later = start + MAX_DEBOUNCE_WAIT_MS - 30_000;
+  assert.equal(debounceFireAt(later, start), start + MAX_DEBOUNCE_WAIT_MS);
+  // ...but never beyond the cap, and never into the past.
+  const tooLate = start + MAX_DEBOUNCE_WAIT_MS + 5_000;
+  assert.equal(debounceFireAt(tooLate, start), tooLate);
+  // Without a recorded burst start the window starts now.
+  assert.equal(debounceFireAt(start, undefined), start + DEFAULT_DEBOUNCE_MS);
 });

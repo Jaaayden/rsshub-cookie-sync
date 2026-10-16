@@ -616,7 +616,11 @@ class InstallAssetTests(unittest.TestCase):
     def test_server_bootstrap_downloads_source_and_keeps_prompts_on_tty(self):
         """The curl|sudo entry point must fetch code and preserve interaction."""
         source = self._source(BOOTSTRAP_SCRIPT)
-        self.assertIn("api.github.com/repos/Jaaayden/rsshub-cookie-sync/releases/latest", source)
+        self.assertIn("releases/latest/download", source)
+        self.assertIn("rsshub-cookie-sync-source.tar.gz", source)
+        self.assertIn("SHA256SUMS", source)
+        self.assertIn("源码归档校验失败", source)
+        self.assertNotIn("api.github.com", source)
         self.assertNotIn("archive/refs/heads/main.tar.gz", source)
         self.assertIn("mktemp -d /root/.rsshub-cookie-sync-install.", source)
         self.assertNotIn("mktemp -d /tmp/", source)
