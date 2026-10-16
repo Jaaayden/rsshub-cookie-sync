@@ -32,8 +32,8 @@ test('刷新扩展状态按钮只请求 get-status，不发起 sync-now 或 Cook
       enabled: true,
       permissions: { zhihu: true, weibo: true },
       providers: {
-        zhihu: { hash: null, lastSyncAt: null, lastResult: null, lastReason: null },
-        weibo: { hash: null, lastSyncAt: null, lastResult: null, lastReason: null },
+        zhihu: { hash: null, lastSyncAt: null, lastUploadAt: null, lastResult: null, lastReason: null },
+        weibo: { hash: null, lastSyncAt: null, lastUploadAt: null, lastResult: null, lastReason: null },
       },
     };
   };
@@ -52,8 +52,8 @@ test('刷新扩展状态按钮只请求 get-status，不发起 sync-now 或 Cook
       enabled: true,
       permissions: { zhihu: true, weibo: true },
       providers: {
-        zhihu: { hash: null, lastSyncAt: null, lastResult: null, lastReason: null },
-        weibo: { hash: null, lastSyncAt: null, lastResult: null, lastReason: null },
+        zhihu: { hash: null, lastSyncAt: null, lastUploadAt: null, lastResult: null, lastReason: null },
+        weibo: { hash: null, lastSyncAt: null, lastUploadAt: null, lastResult: null, lastReason: null },
       },
     },
   ]);

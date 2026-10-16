@@ -62,7 +62,7 @@ function fakeCookie(provider) {
   };
 }
 
-function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfigResponse = null, cookiesByProvider = {}, grantedOrigins = null } = {}) {
+function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfigResponse = null, cookiesByProvider = {}, grantedOrigins = null, syncStatus = 'candidate_saved' } = {}) {
   const events = {
     installed: makeEvent(),
     startup: makeEvent(),
@@ -103,7 +103,7 @@ function makeChrome({ initialStorage = {}, deferStorageGet = false, nativeConfig
         }
         const providers = {};
         for (const provider of Object.keys(payload.providers ?? {})) {
-          providers[provider] = { status: 'candidate_saved', reason: 'ok' };
+          providers[provider] = { status: syncStatus, reason: 'ok' };
         }
         callback({ version: 1, providers });
       },
@@ -712,4 +712,34 @@ test('single-provider retry preserves other providers and logs safe per-stage re
     assert.equal(invalid.ok, false);
     assert.equal(fake.nativeMessages.length, 1);
   } finally { globalThis.chrome = previousChrome; }
+});
+
+test('periodic checks skip the upload for a Cookie the server already confirmed', async () => {
+  const previousChrome = globalThis.chrome;
+  const fake = makeChrome({ syncStatus: 'unchanged' });
+  globalThis.chrome = fake.chrome;
+  try {
+    await import(`../background.js?fake-chrome=skip-${Date.now()}`);
+    await flush();
+
+    fake.events.startup.dispatch();
+    await waitFor(() => fake.nativeMessages.length === 3, 'start-up uploads every provider');
+
+    // Same Cookie, confirmed moments ago: the periodic check does not touch SSH.
+    fake.events.alarm.dispatch({ name: 'rsshub-cookie-sync:periodic' });
+    await waitFor(() => fake.cookieReads.length >= 6, 'periodic check still reads the Cookie');
+    assert.equal(fake.nativeMessages.length, 3, 'periodic check must not upload an unchanged Cookie');
+    const status = await sendMessage(fake.events.message, { type: 'get-status' });
+    assert.equal(status.providers.zhihu.lastResult, 'unchanged');
+
+    // A manual sync always reaches the server.
+    await sendMessage(fake.events.message, { type: 'sync-now' });
+    assert.equal(fake.nativeMessages.length, 6);
+
+    // Start-up always uploads again, even for the same Cookie.
+    fake.events.startup.dispatch();
+    await waitFor(() => fake.nativeMessages.length === 9, 'start-up always uploads');
+  } finally {
+    globalThis.chrome = previousChrome;
+  }
 });

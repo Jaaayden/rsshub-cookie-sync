@@ -65,6 +65,8 @@ export const COOKIE_PERMISSION_ORIGINS = Object.freeze(
 export const MAX_COOKIE_HEADER_LENGTH = 64 * 1024;
 
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+// Detecting control characters is the point of this expression.
+// eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000\r\n]/u;
 
 export function getCookieTarget(provider) {

@@ -1,7 +1,7 @@
 import { PROVIDERS, validateCookieHeader, validateTwitterHeader } from './cookies.js';
 
 export const PROTOCOL_VERSION = 1;
-export const NATIVE_HOST_NAME = 'com.jayden.rsshub_cookie_sync';
+export const NATIVE_HOST_NAME = 'io.github.jaaayden.rsshub_cookie_sync';
 
 export const HOST_RESULT_STATUSES = Object.freeze([
   'unchanged',

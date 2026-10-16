@@ -5,6 +5,8 @@ import {
   DEFAULT_DEBOUNCE_MS,
   MAX_DEBOUNCE_WAIT_MS,
   createDefaultState,
+  UPLOAD_REFRESH_MS,
+  canSkipUpload,
   debounceFireAt,
   nextDebounceAt,
   parseDebounceAlarm,
@@ -35,6 +37,7 @@ test('default and persisted state contain metadata only', () => {
   assert.deepEqual(sanitized.providers.zhihu, {
     hash: 'a'.repeat(64),
     lastSyncAt: 123,
+    lastUploadAt: null,
     lastResult: 'promoted',
     lastReason: 'ok',
   });
@@ -53,6 +56,7 @@ test('provider updates persist hash and safe status but never a Cookie header', 
   assert.deepEqual(state.providers.zhihu, {
     hash: 'b'.repeat(64),
     lastSyncAt: 1700000000000,
+    lastUploadAt: null,
     lastResult: 'candidate_saved',
     lastReason: 'ok',
   });
@@ -81,4 +85,33 @@ test('a burst of cookie changes cannot postpone the debounced sync forever', () 
   assert.equal(debounceFireAt(tooLate, start), tooLate);
   // Without a recorded burst start the window starts now.
   assert.equal(debounceFireAt(start, undefined), start + DEFAULT_DEBOUNCE_MS);
+});
+
+test('an unchanged Cookie is only re-uploaded on start-up, manual sync or after the refresh interval', () => {
+  const hash = 'c'.repeat(64);
+  const now = 10 * UPLOAD_REFRESH_MS;
+  let state = updateProviderState(createDefaultState(), 'zhihu', {
+    hash,
+    result: { status: 'unchanged', reason: 'direct_sync' },
+    now: now - 1000,
+  });
+  const provider = state.providers.zhihu;
+  assert.equal(provider.lastUploadAt, now - 1000);
+
+  assert.equal(canSkipUpload(provider, hash, 'periodic', now), true);
+  assert.equal(canSkipUpload(provider, hash, 'cookie_changed:zhihu', now), true);
+  // Different Cookie, or a trigger that must always reach the server.
+  assert.equal(canSkipUpload(provider, 'd'.repeat(64), 'periodic', now), false);
+  for (const reason of ['startup', 'installed', 'enabled', 'manual']) {
+    assert.equal(canSkipUpload(provider, hash, reason, now), false, reason);
+  }
+  // The confirmation is too old.
+  assert.equal(canSkipUpload(provider, hash, 'periodic', now - 1000 + UPLOAD_REFRESH_MS), false);
+  // A failed or unconfirmed last result is never skipped.
+  for (const status of ['retryable_error', 'candidate_saved', 'rejected_invalid']) {
+    state = updateProviderState(state, 'zhihu', { hash, result: { status }, now: now - 500 });
+    assert.equal(canSkipUpload(state.providers.zhihu, hash, 'periodic', now), false, status);
+  }
+  // A check that fails does not advance the confirmation time.
+  assert.equal(state.providers.zhihu.lastUploadAt, now - 1000);
 });
