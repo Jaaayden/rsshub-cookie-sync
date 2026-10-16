@@ -1,0 +1,19 @@
+# Lint the Python sources.  The server and Native Host support Python 3.9+.
+target-version = "py39"
+line-length = 120
+extend-exclude = ["dist", ".cache"]
+
+[lint]
+# Pyflakes (F), pycodestyle errors that indicate bugs (E4, E7, E9) and
+# bugbear (B) catch real mistakes without reformatting the code base.
+select = ["F", "E4", "E7", "E9", "B"]
+ignore = [
+    "B008",  # function call in argument defaults: used for dataclass defaults
+]
+
+[lint.per-file-ignores]
+# The entry script re-exports the package API under its historical name.
+"server/rsshub_cookie_sync.py" = ["F401"]
+# Tests import modules after adjusting sys.path.
+"**/test_*.py" = ["E402"]
+"tests/*.py" = ["E402"]

@@ -10,13 +10,22 @@
 - Node.js 20 或更高版本；
 - npm、GNU Make，以及用于检查扩展压缩包的 `zip`/`unzip`。
 
-克隆仓库后，在项目根目录运行：
+克隆仓库后，先安装一次 lint 工具，再在项目根目录运行检查：
 
 ```bash
+python3 -m pip install -r requirements-dev.txt
+npm ci --prefix extension
 make check
 ```
 
-该命令会执行 Python 语法检查、服务端测试、Native Messaging Host 测试和 Edge 扩展测试。也可以按模块运行 `make test-server`、`make test-native-host` 或 `make test-extension`。
+`make check` 会执行 Python 语法检查、lint（ruff 和 eslint）、服务端测试、Native Messaging Host 测试、Edge 扩展测试，以及 Native Host 与服务端校验规则的一致性测试。也可以按模块运行 `make test-server`、`make test-native-host`、`make test-extension`、`make test-contract` 或 `make lint`。
+
+## 代码结构
+
+- `extension/`：Edge 扩展（Manifest V3，无构建步骤）。
+- `native-host/`：Mac 上的 Native Messaging Host 与安装器。
+- `server/rsshub_cookie_sync.py`：服务端入口脚本；实现位于 `server/rsshub_sync/` 包，按依赖从底层到上层分为常量/错误、文件与校验、配置、外部系统（HTTP、Docker、Bark）、Compose 迁移、状态机和命令行。包内部使用相对导入，只依赖标准库，安装时整个目录与入口脚本一起复制。
+- Native Host、服务端和扩展各自带一份 Cookie 校验规则，因为它们分别部署、无法共享代码。`tests/test_protocol_contract.py` 保证 Native Host 放行的内容服务端不会拒绝；修改任意一处校验时请同步检查它。
 
 ## 凭据与测试数据
 
