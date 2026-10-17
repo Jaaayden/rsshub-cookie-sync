@@ -83,6 +83,28 @@ ask_yes_no() {
 # escape hatch in the argument parser below, but do not make every user learn
 # Compose's internal project/service terminology.
 discover_compose_file() {
+    # A reinstall or upgrade should start from the Compose file that was
+    # installed before, not from whatever happens to be in the current
+    # directory (which may be an unrelated project).
+    saved_compose=$(/usr/bin/python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        value = json.load(handle).get("deployment", {}).get("compose_file")
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(2)
+if isinstance(value, str) and value.startswith("/") and not any(char in value for char in "\x00\r\n"):
+    print(value)
+' /etc/rsshub-cookie-sync/config.json 2>/dev/null || true)
+    if [ -n "$saved_compose" ] && [ -f "$saved_compose" ] && [ ! -L "$saved_compose" ]; then
+        COMPOSE_FILE=$saved_compose
+        echo "检测到上次安装使用的 Compose 文件：$COMPOSE_FILE" >&2
+        if ask_yes_no "继续使用它吗" yes; then
+            return 0
+        fi
+        COMPOSE_FILE=
+    fi
+
     for candidate in \
         "$PWD/docker-compose.yml" "$PWD/docker-compose.yaml" \
         "$PWD/compose.yml" "$PWD/compose.yaml" \
@@ -90,7 +112,7 @@ discover_compose_file() {
         /opt/rsshub/compose.yml /opt/rsshub/compose.yaml \
         /root/rsshub/docker-compose.yml /root/rsshub/docker-compose.yaml \
         /root/rsshub/compose.yml /root/rsshub/compose.yaml; do
-        if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+        if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ "$candidate" != "$saved_compose" ]; then
             COMPOSE_FILE=$candidate
             echo "检测到 RSSHub Compose 文件：$COMPOSE_FILE" >&2
             if ask_yes_no "将检查并迁移这个文件，继续吗" yes; then
@@ -1037,17 +1059,36 @@ finish_interactive_setup() {
     [ -r /dev/tty ] || return 0
 
     echo >&2
-    if ask_yes_no "现在配置 Bark 通知吗"; then
-        # configure-bark reads from the terminal itself and uses getpass, so
-        # the Device Key is neither an argument nor an echoed shell input.
-        if /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
-            --config "$CONFIG_FILE" configure-bark < /dev/tty >/dev/null; then
-            echo "Bark 已配置。" >&2
+    if bark_already_configured; then
+        # Never make the operator retype a working key.  Changing it is an
+        # explicit, default-no choice, and a failed attempt keeps the old one.
+        echo "已检测到 Bark 通知配置（设备密钥已保存，不会显示）。" >&2
+        if ask_yes_no "需要更换 Bark 设备密钥吗"; then
+            run_configure_bark
         else
-            echo "Bark 配置失败；安装已完成，可稍后重新运行 configure-bark。" >&2
+            echo "保留现有 Bark 配置。" >&2
         fi
+    elif ask_yes_no "现在配置 Bark 通知吗"; then
+        run_configure_bark
     fi
+}
 
+# True when the installed service reports a usable Bark destination.  Only a
+# boolean is read; the Device Key never leaves the config file.
+bark_already_configured() {
+    /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" --config "$CONFIG_FILE" status --json 2>/dev/null \
+        | /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("notifications", {}).get("bark_configured") is True else 1)' 2>/dev/null
+}
+
+run_configure_bark() {
+    # configure-bark reads from the terminal itself and uses getpass, so the
+    # Device Key is neither an argument nor an echoed shell input.
+    if /usr/bin/python3 "$INSTALL_DIR/rsshub_cookie_sync.py" \
+        --config "$CONFIG_FILE" configure-bark < /dev/tty >/dev/null; then
+        echo "Bark 已配置。" >&2
+    else
+        echo "Bark 配置失败，原有配置未改动；安装已完成，可稍后重新运行 configure-bark。" >&2
+    fi
 }
 
 # Freeze the existing scheduler before touching config, Compose, or its
