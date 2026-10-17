@@ -3,6 +3,11 @@ Description=Run RSSHub Cookie monitor every 15 minutes
 
 [Timer]
 OnBootSec=5min
+# OnUnitActiveSec only counts from a previous run of the service. After the
+# timer is restarted (every reinstall does that) on a machine that booted long
+# ago neither it nor OnBootSec has an anchor, and the timer would stay idle
+# until the next reboot. OnActiveSec anchors on the timer's own start.
+OnActiveSec=1min
 OnUnitActiveSec=15min
 AccuracySec=1min
 Persistent=true
