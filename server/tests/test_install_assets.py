@@ -368,6 +368,16 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("上次安装使用的 Compose 文件", result.stderr)
         self.assertEqual(result.stderr.count("ASK:"), 1)
 
+    def test_monitor_timer_restarts_by_itself_after_the_installer_restarts_it(self):
+        """A restarted timer needs an anchor of its own or it never fires again."""
+        timer = self._source(SERVER_DIR / "rsshub-cookie-sync-monitor.timer")
+        settings = dict(
+            line.split("=", 1) for line in timer.splitlines() if "=" in line and not line.startswith("#")
+        )
+        self.assertEqual(settings["OnUnitActiveSec"], "15min")
+        self.assertEqual(settings["OnActiveSec"], "1min")
+        self.assertEqual(settings["OnBootSec"], "5min")
+
     def test_python_package_is_installed_checked_and_removed_with_the_entry_script(self):
         install = self._source(INSTALL_SCRIPT)
         uninstall = self._source(UNINSTALL_SCRIPT)

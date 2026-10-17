@@ -137,7 +137,7 @@ gh attestation verify rsshub-cookie-sync-extension.zip --repo Jaaayden/rsshub-co
 
 ## X/Twitter 同步与升级
 
-**已安装旧版？按 [从旧版本升级到 v1.4.1](docs/upgrade.md) 操作**：按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新三个组件，并检查新增权限和配置刷新结果。v1.4.0 起 Native Host 的注册名称改为 `io.github.jaaayden.rsshub_cookie_sync`，所以必须先更新 Mac Native Host，再更新扩展。
+**已安装旧版？按 [从旧版本升级到 v1.4.2](docs/upgrade.md) 操作**：按 **服务端 → Mac Native Host → Edge 扩展** 的顺序更新三个组件，并检查新增权限和配置刷新结果。v1.4.0 起 Native Host 的注册名称改为 `io.github.jaaayden.rsshub_cookie_sync`，所以必须先更新 Mac Native Host，再更新扩展。
 
 X/Twitter 卡片提供“复制 Auth Token”，复制的是 `auth_token` 的裸值。手动入口 `manual-update --provider twitter` 的隐藏提示可接受裸值或单个 `auth_token=值`。服务器只把裸值写入 `TWITTER_AUTH_TOKEN`；浏览器里的其他 X Cookie 不会上传。
 
