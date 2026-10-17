@@ -775,7 +775,13 @@ class SyncService:
                 for key in ("last_probe", "last_probe_at", "last_recreate_at", "last_error")
             },
             "transaction_pending": bool(self.transaction_file.exists() or self.prev_env.exists()),
+            # Only whether a usable Bark destination is configured, never the key.
+            "notifications": {"bark_configured": self._bark_configured()},
         }
+
+    def _bark_configured(self) -> bool:
+        enabled = getattr(self.notifier, "enabled", None)
+        return bool(enabled()) if callable(enabled) else False
 
     def status(self) -> Dict[str, Any]:
         with file_lock(self.config.lock_file):

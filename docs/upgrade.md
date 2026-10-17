@@ -1,7 +1,8 @@
-# 从旧版本升级到 v1.4.0
+# 从旧版本升级到 v1.4.1
 
 ## 这个版本改了什么
 
+- **重装不再重复询问。** 服务端安装器会先沿用上次安装的 Compose 文件，不再先问当前目录里的其他项目；已配置 Bark 时只提示“已检测到 Bark 通知配置”，并询问是否更换设备密钥（默认不更换，换失败时原配置不变），不会再要求重新输入。v1.4.1 起，`status --json` 增加 `notifications.bark_configured`（仅布尔值，不含密钥）。
 - **Native Host 改名。** 注册名称从 `com.jayden.rsshub_cookie_sync` 改为 `io.github.jaaayden.rsshub_cookie_sync`。新版 Mac 安装器会同时保留旧名称的 manifest，所以**先更新 Mac Native Host，旧扩展照常可用**；但新扩展只认新名称，**不能先于 Native Host 更新**。
 - **安装器会校验下载内容。** 一键安装脚本现在下载 Release 的源码包和 `SHA256SUMS`，校验通过才会解压运行；校验失败时不会安装任何内容。
 - **服务端代码改为 Python 包。** 入口脚本 `rsshub_cookie_sync.py` 的路径、命令和 systemd 配置都没变，旁边多了一个 `rsshub_sync/` 目录；服务端安装器会整体替换它，失败时整体回滚。
@@ -37,7 +38,7 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 - 已存在有效的本项目受限公钥时，安装器会保留它，不需要重新生成或替换公钥。如果旧安装没有有效授权，按提示提供当前 Mac 同步密钥的 `.pub` 公钥。
 - 已有 Bark 配置会保留；不需要更改时，在“现在配置 Bark 通知吗”处直接回车选择否。
 
-安装器会从所选 Compose service 的有效环境配置读取 `ACCESS_KEY`，安全保存供服务健康检查使用，不会显示密钥。普通已完成迁移的重装不会无条件重建 RSSHub。v1.4.0 的服务端安装器还会把 `/usr/local/lib/rsshub-cookie-sync/` 下新增的 `rsshub_sync/` 目录整体替换为新版，失败时与其他文件一起回滚。只有检测到实际待完成的 Compose 迁移时，才执行初始化及对应健康检查。等待安装器报告成功后再继续。
+安装器会从所选 Compose service 的有效环境配置读取 `ACCESS_KEY`，安全保存供服务健康检查使用，不会显示密钥。普通已完成迁移的重装不会无条件重建 RSSHub。服务端安装器还会把 `/usr/local/lib/rsshub-cookie-sync/` 下新增的 `rsshub_sync/` 目录整体替换为新版，失败时与其他文件一起回滚。只有检测到实际待完成的 Compose 迁移时，才执行初始化及对应健康检查。等待安装器报告成功后再继续。
 
 ## 2. 更新 Mac Native Host（所有旧版本都需要）
 
@@ -53,14 +54,14 @@ curl -fsSL https://github.com/Jaaayden/rsshub-cookie-sync/releases/latest/downlo
 
 ## 3. 更新 Edge 扩展
 
-1. 下载 [v1.4.0 扩展 ZIP](https://github.com/Jaaayden/rsshub-cookie-sync/releases/download/v1.4.0/rsshub-cookie-sync-extension.zip)，解压到临时目录。
+1. 下载 [v1.4.1 扩展 ZIP](https://github.com/Jaaayden/rsshub-cookie-sync/releases/download/v1.4.1/rsshub-cookie-sync-extension.zip)，解压到临时目录。
 2. 在 `edge://extensions` 找到 RSSHub Cookie Sync，确认原来加载的扩展目录。用解压后包含 `manifest.json` 的目录内文件替换原扩展目录中的对应文件，避免多套一层目录。
-3. 点击该扩展的“重新加载”，确认页面显示版本 **1.4.0**。不用移除再安装扩展；保留原目录和固定扩展 ID。
+3. 点击该扩展的“重新加载”，确认页面显示版本 **1.4.1**。不用移除再安装扩展；保留原目录和固定扩展 ID。
 4. 打开扩展，进入“连接设置”，点击“重新读取设置”，确认 Native Host 可用，服务器地址、端口和密钥文件名仍正确。如果提示 Native Host 不可用，说明第 2 步还没做或没成功：先完成第 2 步，再回来重新加载扩展。
 5. 点击“授权站点权限”，允许知乎和微博新增的精确 HTTP host 权限。Chromium 会根据 Cookie 的 `Secure` 属性检查对应 host 权限，因此这一步用于读取 `d_c0` 等非 Secure Cookie；扩展仍通过 HTTPS URL 查询 Cookie，不会用 HTTP 请求知乎或微博。升级旧于 v1.3.0 的版本时，也授予新增的 `x.com` 和 `twitter.com` 权限，并在同一个 Edge Default Profile 登录 [X](https://x.com)。
 6. 点击“立即同步”。确认知乎、微博（以及已配置 X 时的 X/Twitter）卡片出现结果后，恢复自动同步开关。
 
-可从 [v1.4.0 Release](https://github.com/Jaaayden/rsshub-cookie-sync/releases/tag/v1.4.0) 下载 `SHA256SUMS`；将其与 ZIP 放在同一目录后运行：
+可从 [v1.4.1 Release](https://github.com/Jaaayden/rsshub-cookie-sync/releases/tag/v1.4.1) 下载 `SHA256SUMS`；将其与 ZIP 放在同一目录后运行：
 
 ```sh
 grep ' rsshub-cookie-sync-extension.zip$' SHA256SUMS | shasum -a 256 -c -

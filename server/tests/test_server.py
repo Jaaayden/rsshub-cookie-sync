@@ -105,6 +105,34 @@ class FakeNotifier:
         return True
 
 
+class StatusBarkTests(unittest.TestCase):
+    """The installer asks "replace Bark?" only if status says one is configured."""
+
+    def _service(self, **bark):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        config = RuntimeConfig(
+            compose_file=root / "docker-compose.yml",
+            live_env=root / "secrets" / "rsshub.env",
+            candidate_dir=root / "secrets" / "candidates",
+            state_file=root / "state.json",
+            lock_file=root / "lock",
+            **bark,
+        )
+        return SyncService(config, notifier=BarkNotifier(config))
+
+    def test_status_reports_only_whether_bark_is_configured(self):
+        configured = self._service(bark_base_url="https://api.day.app", bark_device_key="secret-device-key").public_status()
+        self.assertTrue(configured["notifications"]["bark_configured"])
+        self.assertNotIn("secret-device-key", json.dumps(configured))
+        self.assertFalse(self._service().public_status()["notifications"]["bark_configured"])
+        # A custom notifier without enabled() (as used in tests) is "not configured".
+        service = self._service()
+        service.notifier = object()
+        self.assertFalse(service.public_status()["notifications"]["bark_configured"])
+
+
 class FakeTransport:
     """Provider-shaped responses; it records headers for security assertions."""
 

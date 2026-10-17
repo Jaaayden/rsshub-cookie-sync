@@ -276,6 +276,98 @@ class InstallAssetTests(unittest.TestCase):
     def _source(path: Path) -> str:
         return path.read_text(encoding="utf-8")
 
+    def _extract_functions(self, source, *names):
+        parts = []
+        for name in names:
+            match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.S | re.M)
+            self.assertIsNotNone(match, name)
+            parts.append(match.group(0))
+        return "\n".join(parts)
+
+    def _run_bark_setup(self, *, configured, status_fails=False, answer):
+        """Run the real finish_interactive_setup with a fake service and prompt."""
+        source = self._source(INSTALL_SCRIPT)
+        functions = self._extract_functions(
+            source, "finish_interactive_setup", "bark_already_configured", "run_configure_bark"
+        )
+        # Only the terminal plumbing is replaced: no tty exists in CI.
+        functions = functions.replace("[ -r /dev/tty ] || return 0", ":").replace("< /dev/tty", "< /dev/null")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = root / "rsshub_cookie_sync.py"
+            log = root / "calls.log"
+            fake.write_text(textwrap.dedent(f"""
+                import sys
+                with open({str(log)!r}, "a") as handle:
+                    handle.write(" ".join(sys.argv[3:]) + "\\n")
+                if "status" in sys.argv:
+                    if {status_fails!r}:
+                        sys.exit(1)
+                    print('{{"notifications": {{"bark_configured": {str(configured).lower()}}}}}')
+            """), encoding="utf-8")
+            script = textwrap.dedent(f"""
+                set -eu
+                INTERACTIVE=1
+                INSTALL_DIR={root}
+                CONFIG_FILE={root}/config.json
+                ask_yes_no() {{ echo "ASK: $1" >&2; [ "{answer}" = yes ]; }}
+            """) + functions + "\nfinish_interactive_setup\n"
+            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+            calls = log.read_text(encoding="utf-8") if log.exists() else ""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stderr, calls
+
+    def test_existing_bark_is_kept_without_asking_for_the_key(self):
+        output, calls = self._run_bark_setup(configured=True, answer="no")
+        self.assertIn("已检测到 Bark 通知配置", output)
+        self.assertIn("保留现有 Bark 配置", output)
+        self.assertIn("ASK: 需要更换 Bark 设备密钥吗", output)
+        self.assertNotIn("现在配置 Bark", output)
+        self.assertNotIn("configure-bark", calls)
+
+    def test_existing_bark_is_replaced_only_after_explicit_yes(self):
+        output, calls = self._run_bark_setup(configured=True, answer="yes")
+        self.assertIn("ASK: 需要更换 Bark 设备密钥吗", output)
+        self.assertIn("configure-bark", calls)
+
+    def test_missing_bark_still_offers_to_configure(self):
+        output, calls = self._run_bark_setup(configured=False, answer="yes")
+        self.assertIn("ASK: 现在配置 Bark 通知吗", output)
+        self.assertIn("configure-bark", calls)
+        output, calls = self._run_bark_setup(configured=False, answer="no")
+        self.assertNotIn("configure-bark", calls)
+
+    def test_unreadable_status_falls_back_to_the_original_question(self):
+        output, _ = self._run_bark_setup(configured=True, status_fails=True, answer="no")
+        self.assertIn("ASK: 现在配置 Bark 通知吗", output)
+        self.assertNotIn("已检测到 Bark", output)
+
+    def test_reinstall_starts_from_the_previously_installed_compose_file(self):
+        source = self._source(INSTALL_SCRIPT)
+        function = self._extract_functions(source, "discover_compose_file")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            saved = root / "rsshub" / "docker-compose.yml"
+            other = root / "other" / "docker-compose.yml"
+            for path in (saved, other):
+                path.parent.mkdir()
+                path.write_text("services: {}\n", encoding="utf-8")
+            config = root / "config.json"
+            config.write_text('{"deployment": {"compose_file": "%s"}}' % saved, encoding="utf-8")
+            function = function.replace("/etc/rsshub-cookie-sync/config.json", str(config))
+            # The current directory holds an unrelated project; it must not be offered first.
+            function = function.replace('"$PWD/docker-compose.yml"', f'"{other}"')
+            script = textwrap.dedent("""
+                set -eu
+                COMPOSE_FILE=
+                ask_yes_no() { echo "ASK: $1" >&2; return 0; }
+            """) + function + '\ndiscover_compose_file\necho "CHOSEN=$COMPOSE_FILE"\n'
+            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"CHOSEN={saved}", result.stdout)
+        self.assertIn("上次安装使用的 Compose 文件", result.stderr)
+        self.assertEqual(result.stderr.count("ASK:"), 1)
+
     def test_python_package_is_installed_checked_and_removed_with_the_entry_script(self):
         install = self._source(INSTALL_SCRIPT)
         uninstall = self._source(UNINSTALL_SCRIPT)
